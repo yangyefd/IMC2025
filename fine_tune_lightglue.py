@@ -29,7 +29,7 @@ from losses import NLLLoss
 matplotlib.use('Agg')  # 无界面后端，适合在服务器上运行
 
 IMAGE_size = (640, 480)  # 图像大小
-kaggle_run = True
+kaggle_run = False
 
 class AugmentedImagePairDataset(Dataset):
     def __init__(self, image_paths, num_pairs_per_image=5, color_change_prob=0.3):
@@ -38,7 +38,7 @@ class AugmentedImagePairDataset(Dataset):
         self.color_change_prob = color_change_prob
         
         # 基础变换
-        self.color_jitter = K.ColorJitter(0.3, 0.3, 0.3, 0.1, p=0.7)
+        self.color_jitter = K.ColorJitter(0.3, 0.3, 0.3, 0.1, p=0)
         self.perspective = K.RandomPerspective(0.4, p=0.7)
         self.affine = K.RandomAffine(degrees=180, translate=(0.1, 0.1), scale=(0.8, 1.2), p=0.7)
         self.blur = K.RandomGaussianBlur((5, 9), (0.1, 2.0), p=0.5)
@@ -177,8 +177,8 @@ def get_loss(model, pred, data):
 
     return losses
 
-def get_gt(data, batch_size, device, distance_threshold=2):
-    match_matrix = torch.full((batch_size, 1024 + 1, 1024 + 1), 0., device=device, dtype=data['keypoints0'][0].dtype)
+def get_gt(data, batch_size, device, distance_threshold=1):
+    match_matrix = torch.full((batch_size, 512 + 1, 512 + 1), 0., device=device, dtype=data['keypoints0'][0].dtype)
     
     for b in range(batch_size):
         keypoints0 = data['keypoints0'][b]
@@ -454,13 +454,13 @@ def fine_tune_lightglue(lightglue_matcher, images, feature_dir, device, epochs=5
                 feats0 = extractor({
                     "image": imgs0,
                     "image_size": img_sizes0,
-                    "max_kps":1024
+                    "max_kps":512
                 })
                 
                 feats1 = extractor({
                     "image": imgs1,
                     "image_size": img_sizes1,
-                    "max_kps":1024
+                    "max_kps":512
                 })
             
             img_sizes0 = torch.stack([torch.tensor([img.shape[1], img.shape[2]]) for img in imgs0]).to(device)
@@ -547,12 +547,14 @@ def fine_tune_lightglue(lightglue_matcher, images, feature_dir, device, epochs=5
                     # 提取特征
                     viz_feats0 = extractor({
                         "image": viz_img0,
-                        "image_size": viz_img_size0
+                        "image_size": viz_img_size0,
+                        "max_kps":50
                     })
                     
                     viz_feats1 = extractor({
                         "image": viz_img1,
-                        "image_size": viz_img_size1
+                        "image_size": viz_img_size1,
+                        "max_kps":50
                     })
                     
                     # 准备匹配输入

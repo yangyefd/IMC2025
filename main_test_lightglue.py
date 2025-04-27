@@ -380,7 +380,7 @@ print(f"Extracting on device {device}")
 
 dataset_train_test_lst = [
     'ETs',
-    'stairs'
+    # 'stairs'
 ]
 for dataset, predictions in samples.items():
     if datasets_to_process and dataset not in datasets_to_process:
@@ -436,8 +436,9 @@ for dataset, predictions in samples.items():
         lightglue_matcher,
         images, 
         feature_dir, 
-        device, 
-        epochs=3
+        device,
+        batch_size=8,
+        epochs=2
     )
     lightglue_matcher.update_model(fine_tuned_matcher)
     print(f'模型微调完成，耗时 {time() - t:.4f} sec')
