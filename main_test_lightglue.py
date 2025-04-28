@@ -40,6 +40,7 @@ from typing import Optional, Union
 from GIMlightglue_match import Lightglue_Matcher
 from fine_tune_lightglue import fine_tune_lightglue
 from filter_match import adaptive_match_filtering
+from CLIP.clip import clip
 # Device setup
 device = K.utils.get_cuda_device_if_available(0)
 print(f'{device=}')
@@ -48,20 +49,40 @@ def load_torch_image(fname, device=torch.device('cpu')):
     img = K.io.load_image(fname, K.io.ImageLoadType.RGB32, device=device)[None, ...]
     return img
 
+# def get_global_desc(fnames, device=torch.device('cpu')):
+#     processor = AutoImageProcessor.from_pretrained('./models/dinov2-pytorch-base-v1')
+#     model = AutoModel.from_pretrained('./models/dinov2-pytorch-base-v1')
+#     model = model.eval().to(device)
+#     global_descs_dinov2 = []
+#     for i, img_fname_full in tqdm(enumerate(fnames), total=len(fnames)):
+#         key = os.path.splitext(os.path.basename(img_fname_full))[0]
+#         timg = load_torch_image(img_fname_full)
+#         with torch.inference_mode():
+#             inputs = processor(images=timg, return_tensors="pt", do_rescale=False).to(device)
+#             outputs = model(**inputs)
+#             dino_mac = F.normalize(outputs.last_hidden_state[:,1:].max(dim=1)[0], dim=1, p=2)
+#         global_descs_dinov2.append(dino_mac.detach().cpu())
+#     return torch.cat(global_descs_dinov2, dim=0)
+
 def get_global_desc(fnames, device=torch.device('cpu')):
-    processor = AutoImageProcessor.from_pretrained('./models/dinov2-pytorch-base-v1')
-    model = AutoModel.from_pretrained('./models/dinov2-pytorch-base-v1')
+    model, preprocess = clip.load("models/ViT-B-32.pt", device=device)
+    print("分簇模型加载成功")
+
     model = model.eval().to(device)
     global_descs_dinov2 = []
     for i, img_fname_full in tqdm(enumerate(fnames), total=len(fnames)):
         key = os.path.splitext(os.path.basename(img_fname_full))[0]
-        timg = load_torch_image(img_fname_full)
-        with torch.inference_mode():
-            inputs = processor(images=timg, return_tensors="pt", do_rescale=False).to(device)
-            outputs = model(**inputs)
-            dino_mac = F.normalize(outputs.last_hidden_state[:,1:].max(dim=1)[0], dim=1, p=2)
-        global_descs_dinov2.append(dino_mac.detach().cpu())
-    return torch.cat(global_descs_dinov2, dim=0)
+        # 加载并预处理图像
+        timg = preprocess(Image.open(img_fname_full)).unsqueeze(0).to(device)
+
+        # 提取特征
+        with torch.no_grad():
+            features = model.encode_image(timg)
+        # 归一化特征
+        features = features / features.norm(dim=-1, keepdim=True)
+
+        global_descs_dinov2.append(features.detach().cpu())
+    return torch.cat(global_descs_dinov2, dim=0).float()
 
 def get_img_pairs_exhaustive(img_fnames):
     index_pairs = []
@@ -424,8 +445,10 @@ for dataset, predictions in samples.items():
 
     # try:
     t = time()
-    index_pairs = get_image_pairs_shortlist(images, sim_th=0.3, min_pairs=20, 
-                                            exhaustive_if_less=20, device=device)
+    # index_pairs = get_image_pairs_shortlist(images, sim_th=0.3, min_pairs=20, 
+    #                                         exhaustive_if_less=20, device=device)
+    index_pairs = get_image_pairs_shortlist(images, sim_th=0.7, min_pairs=5, 
+                                        exhaustive_if_less=20, device=device)
     timings['shortlisting'].append(time() - t)
     print(f'Shortlisting. Number of pairs to match: {len(index_pairs)}. Done in {time() - t:.4f} sec')
     gc.collect()

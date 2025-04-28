@@ -1,5 +1,5 @@
 import os
-import clip
+from CLIP.clip import clip
 import torch
 import numpy as np
 from PIL import Image
@@ -18,7 +18,7 @@ model, preprocess = clip.load("models/ViT-B-32.pt", device=device)
 print("模型加载成功")
 
 # 图像文件夹路径
-image_folder = "../image-matching-challenge-2025/train/stairs"
+image_folder = "../image-matching-challenge-2025/train/imc2023_haiper"
 print(f"处理文件夹: {image_folder}")
 
 # 获取所有图像文件
@@ -128,7 +128,7 @@ plt.savefig(os.path.join(results_dir, 'similarity_heatmap.png'), dpi=300)
 print(f"热力图已保存到: {os.path.join(results_dir, 'similarity_heatmap.png')}")
 
 # 输出高相似度的图像对
-threshold = 0.8
+threshold = 0.7
 high_similarity_pairs = [(img1, img2, sim) for (img1, img2), sim in similarities.items() if sim > threshold]
 high_similarity_pairs.sort(key=lambda x: x[2], reverse=True)
 
