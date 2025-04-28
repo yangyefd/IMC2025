@@ -45,10 +45,9 @@ from CLIP.clip import clip
 device = K.utils.get_cuda_device_if_available(0)
 print(f'{device=}')
 
-def load_torch_image(fname, device=torch.device('cpu')):
-    img = K.io.load_image(fname, K.io.ImageLoadType.RGB32, device=device)[None, ...]
-    return img
-
+# def load_torch_image(fname, device=torch.device('cpu')):
+#     img = K.io.load_image(fname, K.io.ImageLoadType.RGB32, device=device)[None, ...]
+#     return img
 # def get_global_desc(fnames, device=torch.device('cpu')):
 #     processor = AutoImageProcessor.from_pretrained('./models/dinov2-pytorch-base-v1')
 #     model = AutoModel.from_pretrained('./models/dinov2-pytorch-base-v1')
@@ -97,6 +96,7 @@ def get_image_pairs_shortlist(fnames, sim_th=0.6, min_pairs=20, exhaustive_if_le
     if num_imgs <= exhaustive_if_less:
         return get_img_pairs_exhaustive(fnames)
     descs = get_global_desc(fnames, device=device)
+
     dm = torch.cdist(descs, descs, p=2).detach().cpu().numpy()
     mask = dm <= sim_th
     matching_list = []
@@ -112,6 +112,37 @@ def get_image_pairs_shortlist(fnames, sim_th=0.6, min_pairs=20, exhaustive_if_le
                 continue
             if dm[st_idx, idx] < 1000:
                 matching_list.append(tuple(sorted((st_idx, idx.item()))))
+    return sorted(list(set(matching_list)))
+
+def get_image_pairs_shortlist_clip(fnames, sim_th=0.6, min_pairs=20, exhaustive_if_less=20, 
+                            device=torch.device('cpu')):
+    num_imgs = len(fnames)
+    if num_imgs <= exhaustive_if_less:
+        return get_img_pairs_exhaustive(fnames)
+    descs = get_global_desc(fnames, device=device)        
+    # 计算余弦相似度矩阵 (N x N)
+    similarity = torch.mm(descs, descs.t()).detach().cpu().numpy()
+    
+    # 相似度大于阈值的保留
+    mask = similarity >= sim_th
+    
+    matching_list = []
+    ar = np.arange(num_imgs)
+    
+    for st_idx in range(num_imgs-1):
+        # 找出与当前图像相似度大于阈值的所有图像
+        mask_idx = mask[st_idx]
+        to_match = ar[mask_idx]
+        # 如果符合条件的图像太少，选择相似度最高的前min_pairs个
+        if len(to_match) < min_pairs:
+            to_match = np.argsort(similarity[st_idx])[::-1][:min_pairs+1]  # 降序排列并取前min_pairs+1个
+        for idx in to_match:
+            if st_idx == idx:  # 跳过自己与自己的匹配
+                continue
+            # 添加匹配对
+            matching_list.append(tuple(sorted((st_idx, idx.item() if hasattr(idx, 'item') else idx))))
+    
+    # 去重并排序
     return sorted(list(set(matching_list)))
 
 def detect_aliked(img_fnames, feature_dir='.featureout', num_features=4096, 
@@ -447,7 +478,7 @@ for dataset, predictions in samples.items():
     t = time()
     # index_pairs = get_image_pairs_shortlist(images, sim_th=0.3, min_pairs=20, 
     #                                         exhaustive_if_less=20, device=device)
-    index_pairs = get_image_pairs_shortlist(images, sim_th=0.7, min_pairs=5, 
+    index_pairs = get_image_pairs_shortlist_clip(images, sim_th=0.75, min_pairs=5, 
                                         exhaustive_if_less=20, device=device)
     timings['shortlisting'].append(time() - t)
     print(f'Shortlisting. Number of pairs to match: {len(index_pairs)}. Done in {time() - t:.4f} sec')
@@ -474,18 +505,18 @@ for dataset, predictions in samples.items():
     # timings['feature_matching'].append(time() - t)
     # print(f'Features matched in {time() - t:.4f} sec')
 
-    # 3. 微调LightGlue
-    t = time()
-    fine_tuned_matcher = fine_tune_lightglue(
-        lightglue_matcher,
-        images, 
-        feature_dir, 
-        device,
-        batch_size=8,
-        epochs=3
-    )
-    lightglue_matcher.update_model(fine_tuned_matcher)
-    print(f'模型微调完成，耗时 {time() - t:.4f} sec')
+    # # 3. 微调LightGlue
+    # t = time()
+    # fine_tuned_matcher = fine_tune_lightglue(
+    #     lightglue_matcher,
+    #     images, 
+    #     feature_dir, 
+    #     device,
+    #     batch_size=8,
+    #     epochs=3
+    # )
+    # lightglue_matcher.update_model(fine_tuned_matcher)
+    # print(f'模型微调完成，耗时 {time() - t:.4f} sec')
     
 
     t = time()

@@ -18,7 +18,7 @@ model, preprocess = clip.load("models/ViT-B-32.pt", device=device)
 print("模型加载成功")
 
 # 图像文件夹路径
-image_folder = "../image-matching-challenge-2025/train/imc2023_haiper"
+image_folder = "../image-matching-challenge-2025/train/ETs"
 print(f"处理文件夹: {image_folder}")
 
 # 获取所有图像文件
