@@ -380,6 +380,8 @@ def fine_tune_lightglue(lightglue_matcher, images, feature_dir, device, epochs=5
     matcher = lightglue_matcher.model
     extractor = lightglue_matcher.detector
 
+    accumulation_steps = len(images)*num_pairs_per_image // (30 * batch_size)
+    accumulation_steps = max(1, accumulation_steps)  # 确保至少为1
     # 冻结特征提取器参数
     for param in extractor.parameters():
         param.requires_grad = False
@@ -426,7 +428,8 @@ def fine_tune_lightglue(lightglue_matcher, images, feature_dir, device, epochs=5
     for epoch in range(epochs):
         epoch_loss = 0.0
         batch_count = 0
-        
+        optimizer.zero_grad()
+
         print(f"Epoch {epoch+1}/{epochs}")
         progress_bar = tqdm.tqdm(dataloader)
         
@@ -446,7 +449,6 @@ def fine_tune_lightglue(lightglue_matcher, images, feature_dir, device, epochs=5
             img_sizes0 = IMAGE_size
             img_sizes1 = IMAGE_size
             
-            optimizer.zero_grad()
             
             # 使用半精度提取特征
             with torch.no_grad(), autocast():
@@ -485,24 +487,42 @@ def fine_tune_lightglue(lightglue_matcher, images, feature_dir, device, epochs=5
                 
                 # 计算批量损失
                 loss = compute_batch_transform_loss(matcher, pred, match_data, device)
-            
+
+                scaled_loss = loss / accumulation_steps
+
             if loss.item() > 0:
                 # 使用梯度缩放器处理反向传播
                 scaler.scale(loss).backward()
                 
-                # 梯度裁剪，防止梯度爆炸
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(matcher.parameters(), max_norm=1.0)
-                
-                # 更新参数
-                scaler.step(optimizer)
-                scaler.update()
-                
-                epoch_loss += loss.item()
-                batch_count += 1
-                
-                progress_bar.set_description(f"Loss: {loss.item():.4f}")
+                # 在累积完成后更新参数
+                if (batch_idx + 1) % accumulation_steps == 0:
+                    # 梯度裁剪
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(matcher.parameters(), max_norm=1.0)
+                    
+                    # 更新参数
+                    scaler.step(optimizer)
+                    scaler.update()
+                    optimizer.zero_grad()  # 清零梯度
+                    
+                    # 记录损失
+                    epoch_loss += loss.item()
+                    batch_count += 1
+                    
+                    # 更新进度条
+                    progress_bar.set_description(
+                        f"Loss: {loss.item():.4f} (累积步数: {(batch_idx + 1) % accumulation_steps}/{accumulation_steps})"
+                    )
         
+                # 处理最后一个不完整的累积批次
+        
+        if (batch_idx + 1) % accumulation_steps != 0:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(matcher.parameters(), max_norm=1.0)
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad()
+            
         # 每个epoch结束后，计算平均损失并更新学习率
         if batch_count > 0:
             avg_epoch_loss = epoch_loss / batch_count

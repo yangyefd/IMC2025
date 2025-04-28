@@ -505,18 +505,18 @@ for dataset, predictions in samples.items():
     # timings['feature_matching'].append(time() - t)
     # print(f'Features matched in {time() - t:.4f} sec')
 
-    # # 3. 微调LightGlue
-    # t = time()
-    # fine_tuned_matcher = fine_tune_lightglue(
-    #     lightglue_matcher,
-    #     images, 
-    #     feature_dir, 
-    #     device,
-    #     batch_size=8,
-    #     epochs=3
-    # )
-    # lightglue_matcher.update_model(fine_tuned_matcher)
-    # print(f'模型微调完成，耗时 {time() - t:.4f} sec')
+    # 3. 微调LightGlue
+    t = time()
+    fine_tuned_matcher = fine_tune_lightglue(
+        lightglue_matcher,
+        images, 
+        feature_dir, 
+        device,
+        batch_size=8,
+        epochs=3
+    )
+    lightglue_matcher.update_model(fine_tuned_matcher)
+    print(f'模型微调完成，耗时 {time() - t:.4f} sec')
     
 
     t = time()
