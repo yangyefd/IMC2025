@@ -39,7 +39,7 @@ import metric
 from typing import Optional, Union
 from GIMlightglue_match import Lightglue_Matcher
 from fine_tune_lightglue import fine_tune_lightglue
-
+from filter_match import adaptive_match_filtering
 # Device setup
 device = K.utils.get_cuda_device_if_available(0)
 print(f'{device=}')
@@ -216,6 +216,15 @@ def match_with_gimlightglue(lightglue_matcher, img_fnames, index_pairs, feature_
                 dists, idxs = lightglue_matcher.match(pred)
             if len(idxs) == 0:
                 continue
+                
+             # 应用区域筛选方法
+            filtered_idxs = adaptive_match_filtering(
+                lightglue_matcher, kp1, kp2, idxs.cpu().numpy(), fname1, fname2, device
+            )
+            # 转回tensor
+            if isinstance(filtered_idxs, np.ndarray):
+                idxs = torch.from_numpy(filtered_idxs).to(idxs.device)
+
             n_matches = len(idxs)
             if verbose:
                 print(f'{key1}-{key2}: {n_matches} matches')
@@ -340,11 +349,16 @@ class Prediction:
 
 # Main processing
 is_train = True
+is_OneTest = False
 data_dir = '../image-matching-challenge-2025'
 workdir = './results'
 os.makedirs(workdir, exist_ok=True)
 
-sample_submission_csv = os.path.join(data_dir, 'train_labels.csv' if is_train else 'sample_submission.csv')
+if is_OneTest:
+    sample_submission_csv = os.path.join(data_dir, 'train_labels_one.csv' if is_train else 'sample_submission.csv')
+else:
+    sample_submission_csv = os.path.join(data_dir, 'train_labels.csv' if is_train else 'sample_submission.csv')
+
 samples = {}
 competition_data = pd.read_csv(sample_submission_csv)
 
@@ -378,10 +392,17 @@ mapping_result_strs = []
 
 print(f"Extracting on device {device}")
 
-dataset_train_test_lst = [
-    'ETs',
-    # 'stairs'
-]
+if is_OneTest:
+    dataset_train_test_lst = [
+        'ETs_one',
+        'stairs_one'
+    ]
+else:
+    dataset_train_test_lst = [
+        'ETs',
+        'stairs'
+    ]
+    
 for dataset, predictions in samples.items():
     if datasets_to_process and dataset not in datasets_to_process:
         print(f'Skipping "{dataset}"')
@@ -438,7 +459,7 @@ for dataset, predictions in samples.items():
         feature_dir, 
         device,
         batch_size=8,
-        epochs=2
+        epochs=3
     )
     lightglue_matcher.update_model(fine_tuned_matcher)
     print(f'模型微调完成，耗时 {time() - t:.4f} sec')
@@ -454,6 +475,7 @@ for dataset, predictions in samples.items():
     if os.path.isfile(database_path):
         os.remove(database_path)
     gc.collect()
+
     sleep(1)
     import_into_colmap(images_dir, feature_dir=feature_dir, database_path=database_path)
     output_path = f'{feature_dir}/colmap_rec_aliked'
@@ -529,13 +551,24 @@ with open(submission_file, 'w') as f:
 # Compute results for training set
 if is_train:
     t = time()
-    final_score, dataset_scores = metric.score(
-        gt_csv=os.path.join(data_dir, 'train_labels.csv'),
-        user_csv=submission_file,
-        thresholds_csv=os.path.join(data_dir, 'train_thresholds.csv'),
-        mask_csv=None if is_train else os.path.join(data_dir, 'mask.csv'),
-        inl_cf=0,
-        strict_cf=-1,
-        verbose=True,
-    )
+    if is_OneTest:
+        final_score, dataset_scores = metric.score(
+            gt_csv=os.path.join(data_dir, 'train_labels_one.csv'),
+            user_csv=submission_file,
+            thresholds_csv=os.path.join(data_dir, 'train_thresholds_one.csv'),
+            mask_csv=None if is_train else os.path.join(data_dir, 'mask.csv'),
+            inl_cf=0,
+            strict_cf=-1,
+            verbose=True,
+        )
+    else:
+        final_score, dataset_scores = metric.score(
+            gt_csv=os.path.join(data_dir, 'train_labels.csv'),
+            user_csv=submission_file,
+            thresholds_csv=os.path.join(data_dir, 'train_thresholds.csv'),
+            mask_csv=None if is_train else os.path.join(data_dir, 'mask.csv'),
+            inl_cf=0,
+            strict_cf=-1,
+            verbose=True,
+        )
     print(f'Computed metric in: {time() - t:.02f} sec.')
