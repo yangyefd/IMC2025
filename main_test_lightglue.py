@@ -269,13 +269,13 @@ def match_with_gimlightglue(lightglue_matcher, img_fnames, index_pairs, feature_
             if len(idxs) == 0:
                 continue
                 
-             # 应用区域筛选方法
-            filtered_idxs = adaptive_match_filtering(
-                lightglue_matcher, kp1, kp2, idxs.cpu().numpy(), fname1, fname2, device
-            )
-            # 转回tensor
-            if isinstance(filtered_idxs, np.ndarray):
-                idxs = torch.from_numpy(filtered_idxs).to(idxs.device)
+            #  # 应用区域筛选方法
+            # filtered_idxs = adaptive_match_filtering(
+            #     lightglue_matcher, kp1, kp2, idxs.cpu().numpy(), fname1, fname2, device
+            # )
+            # # 转回tensor
+            # if isinstance(filtered_idxs, np.ndarray):
+            #     idxs = torch.from_numpy(filtered_idxs).to(idxs.device)
 
             n_matches = len(idxs)
             if verbose:
@@ -478,7 +478,7 @@ for dataset, predictions in samples.items():
     t = time()
     # index_pairs = get_image_pairs_shortlist(images, sim_th=0.3, min_pairs=20, 
     #                                         exhaustive_if_less=20, device=device)
-    index_pairs = get_image_pairs_shortlist_clip(images, sim_th=0.75, min_pairs=5, 
+    index_pairs = get_image_pairs_shortlist_clip(images, sim_th=0.75, min_pairs=1, 
                                         exhaustive_if_less=20, device=device)
     timings['shortlisting'].append(time() - t)
     print(f'Shortlisting. Number of pairs to match: {len(index_pairs)}. Done in {time() - t:.4f} sec')
