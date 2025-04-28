@@ -39,7 +39,7 @@ import metric
 from typing import Optional, Union
 from GIMlightglue_match import Lightglue_Matcher
 from fine_tune_lightglue import fine_tune_lightglue
-from filter_match import adaptive_match_filtering
+# from filter_match import adaptive_match_filtering
 from CLIP.clip import clip
 # Device setup
 device = K.utils.get_cuda_device_if_available(0)
