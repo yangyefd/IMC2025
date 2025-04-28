@@ -380,8 +380,9 @@ def fine_tune_lightglue(lightglue_matcher, images, feature_dir, device, epochs=5
     matcher = lightglue_matcher.model
     extractor = lightglue_matcher.detector
 
-    accumulation_steps = len(images)*num_pairs_per_image // (30 * batch_size)
-    accumulation_steps = max(1, accumulation_steps)  # 确保至少为1
+    accumulation_steps_ori = len(images)*num_pairs_per_image / (30 * batch_size)
+    accumulation_steps = max(1, int(accumulation_steps_ori))  # 确保至少为1
+    epochs = max(epochs, int(epochs/accumulation_steps_ori))  # 确保至少为1
     # 冻结特征提取器参数
     for param in extractor.parameters():
         param.requires_grad = False
@@ -522,7 +523,7 @@ def fine_tune_lightglue(lightglue_matcher, images, feature_dir, device, epochs=5
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad()
-            
+
         # 每个epoch结束后，计算平均损失并更新学习率
         if batch_count > 0:
             avg_epoch_loss = epoch_loss / batch_count
