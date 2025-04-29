@@ -321,7 +321,7 @@ def get_padding_size(image, h, w):
     return orig_width, orig_height, pad_left, pad_right, pad_top, pad_bottom
 
 class Lightglue_Matcher():
-    def __init__(self, device):
+    def __init__(self, device, num_features=4096):
         self.model = None
         self.detector = None
         self.device = device
@@ -332,7 +332,7 @@ class Lightglue_Matcher():
         ckpt = 'gim_lightglue_100h.ckpt'
 
         detector = SuperPoint({
-            'max_num_keypoints': 4096,
+            'max_num_keypoints': num_features,
             'force_num_keypoints': True,
             'detection_threshold': 0.0,
             'nms_radius': 3,

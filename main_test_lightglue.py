@@ -605,7 +605,7 @@ for dataset, predictions in samples.items():
     feature_dir = os.path.join(workdir, 'featureout', dataset)
     os.makedirs(feature_dir, exist_ok=True)
 
-    lightglue_matcher = Lightglue_Matcher(device=device)
+    lightglue_matcher = Lightglue_Matcher(device=device,num_features=4096)
 
     # try:
     t = time()
