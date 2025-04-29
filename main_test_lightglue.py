@@ -45,9 +45,10 @@ from CLIP.clip import clip
 device = K.utils.get_cuda_device_if_available(0)
 print(f'{device=}')
 
-# def load_torch_image(fname, device=torch.device('cpu')):
-#     img = K.io.load_image(fname, K.io.ImageLoadType.RGB32, device=device)[None, ...]
-#     return img
+def load_torch_image(fname, device=torch.device('cpu')):
+    img = K.io.load_image(fname, K.io.ImageLoadType.RGB32, device=device)[None, ...]
+    return img
+
 # def get_global_desc(fnames, device=torch.device('cpu')):
 #     processor = AutoImageProcessor.from_pretrained('./models/dinov2-pytorch-base-v1')
 #     model = AutoModel.from_pretrained('./models/dinov2-pytorch-base-v1')
@@ -166,7 +167,7 @@ def detect_aliked(img_fnames, feature_dir='.featureout', num_features=4096,
                 f_desc[key] = descs
     return
 
-def visualize_matches(img1_path, img2_path, kpts1, kpts2, matches, save_path=None):
+def visualize_matches(img1_path, img2_path, kpts1, kpts2, matches, save_path=None, show=False):
     """可视化两张图片的匹配结果
     
     Args:
@@ -176,6 +177,7 @@ def visualize_matches(img1_path, img2_path, kpts1, kpts2, matches, save_path=Non
         kpts2: 第二张图片的特征点 (Nx2)
         matches: 匹配索引 (Mx2)
         save_path: 保存路径,如果为None则显示
+        show: 是否显示结果
     """
     # 读取图片
     img1 = cv2.imread(img1_path)
@@ -183,36 +185,50 @@ def visualize_matches(img1_path, img2_path, kpts1, kpts2, matches, save_path=Non
     img1 = cv2.cvtColor(img1, cv2.COLOR_BGR2RGB)
     img2 = cv2.cvtColor(img2, cv2.COLOR_BGR2RGB)
     
-    # 调整图片大小使其具有相同高度
+    # 获取原始尺寸
     h1, w1 = img1.shape[:2]
     h2, w2 = img2.shape[:2]
-    height = min(h1, h2)
-    img1 = cv2.resize(img1, (int(w1*height/h1), height))
-    img2 = cv2.resize(img2, (int(w2*height/h2), height))
+    
+    # 调整图片大小使其具有相同高度
+    height = min(h1, h2, 800)  # 限制最大高度为800像素
+    
+    # 计算缩放比例
+    scale1 = height / h1
+    scale2 = height / h2
+    
+    # 调整图像大小
+    img1 = cv2.resize(img1, (int(w1 * scale1), height))
+    img2 = cv2.resize(img2, (int(w2 * scale2), height))
     
     # 创建拼接图
     vis = np.hstack([img1, img2])
     
+    # 复制关键点并按比例缩放
+    kpts1_scaled = kpts1.copy()
+    kpts2_scaled = kpts2.copy()
+    
+    # 应用缩放比例
+    kpts1_scaled[:, 0] *= scale1
+    kpts1_scaled[:, 1] *= scale1
+    kpts2_scaled[:, 0] *= scale2
+    kpts2_scaled[:, 1] *= scale2
+    
     # 绘制匹配线
     offset = img1.shape[1]
     for idx1, idx2 in matches:
-        pt1 = tuple(map(int, kpts1[idx1]))
-        pt2 = tuple(map(int, kpts2[idx2]))
+        pt1 = tuple(map(int, kpts1_scaled[idx1]))
+        pt2 = tuple(map(int, kpts2_scaled[idx2]))
         pt2 = (pt2[0] + offset, pt2[1])
-        cv2.circle(vis, pt1, 2, (0,255,0), -1)
-        cv2.circle(vis, pt2, 2, (0,255,0), -1)
-        cv2.line(vis, pt1, pt2, (255,0,0), 1)
+        cv2.circle(vis, pt1, 2, (0, 255, 0), -1)
+        cv2.circle(vis, pt2, 2, (0, 255, 0), -1)
+        cv2.line(vis, pt1, pt2, (255, 0, 0), 1)
+    
+    # 添加匹配数量文本
+    cv2.putText(vis, f"Matches: {len(matches)}", (10, 30), 
+                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
 
-    # 显示或保存
-    # plt.figure(figsize=(20,10))
-    # plt.imshow(vis)
-    # plt.axis('off')
-    if save_path:
-        cv2.imwrite(save_path, cv2.cvtColor(vis, cv2.COLOR_RGB2BGR))
-        # plt.savefig(save_path)
-        # plt.close()
-    # else:
-    #     plt.show()
+    cv2.imwrite(save_path, cv2.cvtColor(vis, cv2.COLOR_RGB2BGR))
+
 
 def detect_sp(lightglue_matcher, img_fnames, feature_dir='.featureout', num_features=4096, 
                  resize_to=1024, device=torch.device('cpu')):
@@ -285,15 +301,127 @@ def match_with_gimlightglue(lightglue_matcher, img_fnames, index_pairs, feature_
                 group.create_dataset(key2, data=idxs.detach().cpu().numpy().reshape(-1, 2))
                 match_matrix[idx1,idx2] = len(idxs.detach().cpu().numpy().reshape(-1, 2))
                                 # 添加可视化
-                if visualize:
-                    vis_dir = os.path.join(feature_dir, 'visualizations')
-                    os.makedirs(vis_dir, exist_ok=True)
-                    save_path = os.path.join(vis_dir, f'{key1}_{key2}_matches.png')
-                    visualize_matches(fname1, fname2, 
-                                   kp1.cpu().numpy(), 
-                                   kp2.cpu().numpy(),
-                                   idxs.cpu().numpy(),
-                                   save_path)
+                # if visualize:
+                #     vis_dir = os.path.join(feature_dir, 'visualizations')
+                #     os.makedirs(vis_dir, exist_ok=True)
+                #     save_path = os.path.join(vis_dir, f'{key1}_{key2}_matches.png')
+                #     visualize_matches(fname1, fname2, 
+                #                    kp1.cpu().numpy(), 
+                #                    kp2.cpu().numpy(),
+                #                    idxs.cpu().numpy(),
+                #                    save_path)
+    return match_matrix
+
+def match_with_gimlightglue_batch(lightglue_matcher, img_fnames, index_pairs, feature_dir='.featureout', 
+                        device=torch.device('cpu'), batch_size=8, min_matches=15, verbose=True, visualize=True):
+    """使用批处理方式进行特征匹配，大幅提高速度"""
+    match_matrix = np.zeros((len(img_fnames), len(img_fnames)), dtype=np.int32)
+    
+    # 批量加载特征数据
+    print("加载特征数据...")
+    features_data = {}
+    with h5py.File(f'{feature_dir}/keypoints.h5', mode='r') as f_kp, \
+         h5py.File(f'{feature_dir}/descriptors.h5', mode='r') as f_desc, \
+         h5py.File(f'{feature_dir}/size.h5', mode='r') as f_size, \
+         h5py.File(f'{feature_dir}/scale.h5', mode='r') as f_scale:
+         
+        for img_path in tqdm(img_fnames):
+            key = img_path.split('/')[-1].split('\\')[-1]
+            features_data[key] = {
+                'kp': torch.from_numpy(f_kp[key][...]).to(device),
+                'desc': torch.from_numpy(f_desc[key][...]).to(device),
+                'size': torch.from_numpy(f_size[key][...]).to(device),
+                'scale': torch.from_numpy(f_scale[key][...]).to(device),
+            }
+    
+    # 批量处理
+    with h5py.File(f'{feature_dir}/matches.h5', mode='w') as f_match:
+        # 将图像对分成批次
+        num_batches = (len(index_pairs) + batch_size - 1) // batch_size
+        for batch_idx in range(num_batches):
+            start_idx = batch_idx * batch_size
+            end_idx = min((batch_idx + 1) * batch_size, len(index_pairs))
+            batch_pairs = index_pairs[start_idx:end_idx]
+            
+            batch_data = []
+            batch_info = []
+            
+            # 准备批次数据
+            for pair_idx in batch_pairs:
+                idx1, idx2 = pair_idx
+                fname1, fname2 = img_fnames[idx1], img_fnames[idx2]
+                key1 = fname1.split('/')[-1].split('\\')[-1]
+                key2 = fname2.split('/')[-1].split('\\')[-1]
+                
+                # 获取图像特征
+                kp1 = features_data[key1]['kp']
+                kp2 = features_data[key2]['kp']
+                desc1 = features_data[key1]['desc']
+                desc2 = features_data[key2]['desc']
+                
+                pred = {
+                    'keypoints0': kp1[None],
+                    'keypoints1': kp2[None],
+                    'descriptors0': desc1[None],
+                    'descriptors1': desc2[None],
+                    'size0': features_data[key1]['size'],
+                    'size1': features_data[key2]['size'],
+                    'scale0': features_data[key1]['scale'],
+                    'scale1': features_data[key2]['scale'],
+                }
+                
+                batch_data.append(pred)
+                batch_info.append((idx1, idx2, key1, key2, fname1, fname2))
+            
+            # 批量匹配
+            print(f"处理批次 {batch_idx+1}/{num_batches} ({len(batch_pairs)} 对图像)...")
+            
+            # 合并批次预测数据
+            batch_preds = {
+                'keypoints0': torch.cat([data['keypoints0'] for data in batch_data], dim=0).to(device),
+                'keypoints1': torch.cat([data['keypoints1'] for data in batch_data], dim=0).to(device),
+                'descriptors0': torch.cat([data['descriptors0'] for data in batch_data], dim=0).to(device),
+                'descriptors1': torch.cat([data['descriptors1'] for data in batch_data], dim=0).to(device),
+                'size0': torch.stack([data['size0'] for data in batch_data], dim=0).to(device),
+                'size1': torch.stack([data['size1'] for data in batch_data], dim=0).to(device),
+                'scale0': torch.stack([data['scale0'] for data in batch_data], dim=0).to(device),
+                'scale1': torch.stack([data['scale1'] for data in batch_data], dim=0).to(device),
+            }
+            
+            # 批量推理
+            with torch.inference_mode():
+                batch_dists, batch_idxs = lightglue_matcher.match_batch(batch_preds)
+            
+            # 处理结果
+            for i, (idx1, idx2, key1, key2, fname1, fname2) in enumerate(batch_info):
+                if i >= len(batch_idxs) or batch_idxs[i] is None or len(batch_idxs[i]) == 0:
+                    continue
+                
+                idxs = batch_idxs[i]
+                n_matches = len(idxs)
+                
+                if verbose:
+                    print(f'{key1}-{key2}: {n_matches} matches')
+                
+                # 保存匹配结果
+                if n_matches >= min_matches:
+                    group = f_match.require_group(key1)
+                    group.create_dataset(key2, data=idxs.detach().cpu().numpy().reshape(-1, 2))
+                    match_matrix[idx1, idx2] = n_matches
+                    
+                    # # 可视化匹配
+                    # if visualize:
+                    #     vis_dir = os.path.join(feature_dir, 'visualizations')
+                    #     os.makedirs(vis_dir, exist_ok=True)
+                    #     save_path = os.path.join(vis_dir, f'{key1}_{key2}_matches.png')
+                    #     visualize_matches(
+                    #         fname1, fname2,
+                    #         features_data[key1]['kp'].cpu().numpy(),
+                    #         features_data[key2]['kp'].cpu().numpy(),
+                    #         idxs.cpu().numpy(),
+                    #         save_path
+                    #     )
+    
     return match_matrix
 
 def match_with_lightglue(img_fnames, index_pairs, feature_dir='.featureout', 
@@ -451,8 +579,9 @@ if is_OneTest:
     ]
 else:
     dataset_train_test_lst = [
-        'ETs',
+        # 'ETs',
         'stairs'
+        # 'imc2023_heritage'
     ]
     
 for dataset, predictions in samples.items():
@@ -464,6 +593,10 @@ for dataset, predictions in samples.items():
             continue
     images_dir = os.path.join(data_dir, 'train' if is_train else 'test', dataset)
     images = [os.path.join(images_dir, p.filename) for p in predictions]
+    # images = [
+    #     '../image-matching-challenge-2025/train/imc2023_heritage/dioscuri_img_0095.png',
+    #     '../image-matching-challenge-2025/train/imc2023_heritage/dioscuri_archive_0003.png'
+    # ]
     if max_images is not None:
         images = images[:max_images]
 
@@ -485,7 +618,7 @@ for dataset, predictions in samples.items():
     gc.collect()
 
     # t = time()
-    # detect_aliked(images, feature_dir, 16384, device=device)
+    # detect_aliked(images, feature_dir, 4096, device=device)
     # timings['feature_detection'].append(time() - t)
     # print(f'Features detected in {time() - t:.4f} sec')
     
@@ -505,18 +638,18 @@ for dataset, predictions in samples.items():
     # timings['feature_matching'].append(time() - t)
     # print(f'Features matched in {time() - t:.4f} sec')
 
-    # 3. 微调LightGlue
-    t = time()
-    fine_tuned_matcher = fine_tune_lightglue(
-        lightglue_matcher,
-        images, 
-        feature_dir, 
-        device,
-        batch_size=8,
-        epochs=3
-    )
-    lightglue_matcher.update_model(fine_tuned_matcher)
-    print(f'模型微调完成，耗时 {time() - t:.4f} sec')
+    # # 3. 微调LightGlue
+    # t = time()
+    # fine_tuned_matcher = fine_tune_lightglue(
+    #     lightglue_matcher,
+    #     images, 
+    #     feature_dir, 
+    #     device,
+    #     batch_size=8,
+    #     epochs=5
+    # )
+    # lightglue_matcher.update_model(fine_tuned_matcher)
+    # print(f'模型微调完成，耗时 {time() - t:.4f} sec')
     
 
     t = time()

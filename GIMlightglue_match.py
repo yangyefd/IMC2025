@@ -415,3 +415,21 @@ class Lightglue_Matcher():
         matches = pred['matches'][0]
         mconf = pred['scores'][0]
         return mconf, matches 
+
+    def match_batch(self, pred_in):
+        pred = {}
+        kpts0 = pred_in['keypoints0'] / pred_in['scale0']
+        kpts1 = pred_in['keypoints1'] / pred_in['scale1']
+        pred['keypoints0'] = kpts0.float().to(self.device)
+        pred['keypoints1'] = kpts1.float().to(self.device)
+        pred['descriptors0'] = pred_in['descriptors0'].float().to(self.device)
+        pred['descriptors1'] = pred_in['descriptors1'].float().to(self.device)
+        with torch.no_grad():
+            with torch.cuda.amp.autocast():
+                pred.update(self.model({**pred, 
+                                **{'image_size0': pred_in['size0'][:,0],
+                                    'image_size1': pred_in['size1'][:,0]}}))
+
+        matches = pred['matches']
+        mconf = pred['scores']
+        return mconf, matches 
