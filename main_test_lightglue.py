@@ -229,7 +229,6 @@ def visualize_matches(img1_path, img2_path, kpts1, kpts2, matches, save_path=Non
 
     cv2.imwrite(save_path, cv2.cvtColor(vis, cv2.COLOR_RGB2BGR))
 
-
 def detect_sp(lightglue_matcher, img_fnames, feature_dir='.featureout', num_features=4096, 
                  resize_to=1024, device=torch.device('cpu')):
     dtype = torch.float32
@@ -251,6 +250,43 @@ def detect_sp(lightglue_matcher, img_fnames, feature_dir='.featureout', num_feat
                 f_desc[key] = descs
                 f_size[key] = data['size0'].cpu()
                 f_scale[key] = data['scale0'].cpu()
+    return
+
+def detect_sp_ensemble(lightglue_matcher, img_fnames, feature_dir='.featureout', num_features=4096, 
+                 resize_to=1024, device=torch.device('cpu')):
+    #集成方法 ALIke sp各提一半点 2048个
+    dtype = torch.float32
+
+    extractor_alike = ALIKED(max_num_keypoints=num_features//2, detection_threshold=0.01, 
+                    resize=resize_to).eval().to(device, dtype)
+    
+    if not os.path.isdir(feature_dir):
+        os.makedirs(feature_dir)
+    with h5py.File(f'{feature_dir}/keypoints.h5', mode='w') as f_kp, \
+         h5py.File(f'{feature_dir}/descriptors.h5', mode='w') as f_desc, \
+         h5py.File(f'{feature_dir}/size.h5', mode='w') as f_size,\
+         h5py.File(f'{feature_dir}/scale.h5', mode='w') as f_scale:
+        for img_path in tqdm(img_fnames):
+            img_fname = img_path.split('/')[-1]
+            img_fname = img_fname.split('\\')[-1]
+            key = img_fname
+            with torch.inference_mode():
+                kpts = np.zeros((num_features,2))
+                descs = np.zeros((num_features,256))
+                feats0, data = lightglue_matcher.extract(img_path)
+                kpts[:num_features//2] = feats0['keypoints0'].reshape(-1, 2).detach().cpu().numpy()
+                descs[:num_features//2] = feats0['descriptors0'].reshape(num_features//2, -1).detach().cpu().numpy()
+
+                image0 = load_torch_image(img_path, device=device).to(dtype)
+                feats0_alike = extractor_alike.extract(image0)
+                kpts[num_features//2:] = feats0_alike['keypoints'].reshape(-1, 2).detach().cpu().numpy()
+                descs[num_features//2:,:128] = feats0_alike['descriptors'].reshape(num_features//2, -1).detach().cpu().numpy()
+
+                f_kp[key] = kpts
+                f_desc[key] = descs
+                f_size[key] = data['size0'].cpu()
+                f_scale[key] = data['scale0'].cpu()
+
     return
 
 def match_with_gimlightglue(lightglue_matcher, img_fnames, index_pairs, feature_dir='.featureout', 
@@ -282,6 +318,75 @@ def match_with_gimlightglue(lightglue_matcher, img_fnames, index_pairs, feature_
             pred['scale1'] = torch.from_numpy(f_scale[key2][...]).to(device)
             with torch.inference_mode():
                 dists, idxs = lightglue_matcher.match(pred)
+            if len(idxs) == 0:
+                continue
+                
+            #  # 应用区域筛选方法
+            # filtered_idxs = adaptive_match_filtering(
+            #     lightglue_matcher, kp1, kp2, idxs.cpu().numpy(), fname1, fname2, device
+            # )
+            # # 转回tensor
+            # if isinstance(filtered_idxs, np.ndarray):
+            #     idxs = torch.from_numpy(filtered_idxs).to(idxs.device)
+
+            n_matches = len(idxs)
+            if verbose:
+                print(f'{key1}-{key2}: {n_matches} matches')
+            group = f_match.require_group(key1)
+            if n_matches >= min_matches:
+                group.create_dataset(key2, data=idxs.detach().cpu().numpy().reshape(-1, 2))
+                match_matrix[idx1,idx2] = len(idxs.detach().cpu().numpy().reshape(-1, 2))
+                                # 添加可视化
+                # if visualize:
+                #     vis_dir = os.path.join(feature_dir, 'visualizations')
+                #     os.makedirs(vis_dir, exist_ok=True)
+                #     save_path = os.path.join(vis_dir, f'{key1}_{key2}_matches.png')
+                #     visualize_matches(fname1, fname2, 
+                #                    kp1.cpu().numpy(), 
+                #                    kp2.cpu().numpy(),
+                #                    idxs.cpu().numpy(),
+                #                    save_path)
+    return match_matrix
+
+def match_with_gimlightglue_ensemble(lightglue_matcher, img_fnames, index_pairs, feature_dir='.featureout', 
+                        device=torch.device('cpu'), min_matches=15, verbose=True, visualize=True):
+    match_matrix = np.zeros((len(img_fnames), len(img_fnames)), dtype=np.int32)
+    lg_matcher = KF.LightGlueMatcher("aliked", {"width_confidence": -1,
+                                            "depth_confidence": -1,
+                                            "mp": True if 'cuda' in str(device) else False}).eval().to(device)
+    with h5py.File(f'{feature_dir}/keypoints.h5', mode='r') as f_kp, \
+        h5py.File(f'{feature_dir}/descriptors.h5', mode='r') as f_desc, \
+        h5py.File(f'{feature_dir}/size.h5', mode='r') as f_size, \
+        h5py.File(f'{feature_dir}/scale.h5', mode='r') as f_scale, \
+        h5py.File(f'{feature_dir}/matches.h5', mode='w') as f_match:
+        for pair_idx in tqdm(index_pairs):
+            idx1, idx2 = pair_idx
+            fname1, fname2 = img_fnames[idx1], img_fnames[idx2]
+            key1, key2 = fname1.split('/')[-1], fname2.split('/')[-1]
+            key1 = key1.split('\\')[-1]
+            key2 = key2.split('\\')[-1]
+            kp1 = torch.from_numpy(f_kp[key1][...]).to(device)
+            kp2 = torch.from_numpy(f_kp[key2][...]).to(device)
+            desc1 = torch.from_numpy(f_desc[key1][...]).to(device)
+            desc2 = torch.from_numpy(f_desc[key2][...]).to(device)
+
+            num_pts = len(kp1)
+            pred = {}
+            pred['keypoints0'] = kp1[None][:num_pts//2]
+            pred['keypoints1'] = kp2[None][:num_pts//2]
+            pred['descriptors0'] = desc1[None][:num_pts//2]
+            pred['descriptors1'] = desc2[None][:num_pts//2]
+            pred['size0'] = torch.from_numpy(f_size[key1][...]).to(device)
+            pred['size1'] = torch.from_numpy(f_size[key2][...]).to(device)
+            pred['scale0'] = torch.from_numpy(f_scale[key1][...]).to(device)
+            pred['scale1'] = torch.from_numpy(f_scale[key2][...]).to(device)
+            with torch.inference_mode():
+                dists, idxs = lightglue_matcher.match(pred)
+                _, idxs_alike = lg_matcher(desc1[num_pts//2:,:128].float(), desc2[num_pts//2:,:128].float(),
+                        KF.laf_from_center_scale_ori(kp1[num_pts//2:][None].float()),
+                        KF.laf_from_center_scale_ori(kp2[num_pts//2:][None].float()))
+                idxs_alike += num_pts//2
+                idxs = torch.cat([idxs, idxs_alike], dim=0)
             if len(idxs) == 0:
                 continue
                 
@@ -579,7 +684,7 @@ if is_OneTest:
     ]
 else:
     dataset_train_test_lst = [
-        # 'ETs',
+        'ETs',
         'stairs'
         # 'imc2023_heritage'
     ]
@@ -605,8 +710,6 @@ for dataset, predictions in samples.items():
     feature_dir = os.path.join(workdir, 'featureout', dataset)
     os.makedirs(feature_dir, exist_ok=True)
 
-    lightglue_matcher = Lightglue_Matcher(device=device,num_features=4096)
-
     # try:
     t = time()
     # index_pairs = get_image_pairs_shortlist(images, sim_th=0.3, min_pairs=20, 
@@ -627,9 +730,10 @@ for dataset, predictions in samples.items():
     # timings['feature_matching'].append(time() - t)
     # print(f'Features matched in {time() - t:.4f} sec')
 
+    lightglue_matcher = Lightglue_Matcher(device=device,num_features=2048)
     t = time()
     # detect_aliked(images, feature_dir, 4096, device=device)
-    detect_sp(lightglue_matcher, images, feature_dir, 4096, device=device)
+    detect_sp_ensemble(lightglue_matcher, images, feature_dir, 4096, device=device)
     timings['feature_detection'].append(time() - t)
     print(f'Features detected in {time() - t:.4f} sec')
         
@@ -653,7 +757,7 @@ for dataset, predictions in samples.items():
     
 
     t = time()
-    match_matrix = match_with_gimlightglue(lightglue_matcher, images, index_pairs, feature_dir=feature_dir, device=device, verbose=False)
+    match_matrix = match_with_gimlightglue_ensemble(lightglue_matcher, images, index_pairs, feature_dir=feature_dir, device=device, verbose=False)
     timings['feature_matching'].append(time() - t)
     print(f'Features matched in {time() - t:.4f} sec')
     print('match_matrix', match_matrix.sum())
