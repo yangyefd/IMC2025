@@ -352,6 +352,45 @@ def match_with_gimlightglue(lightglue_matcher, img_fnames, index_pairs, feature_
                 #                    save_path)
     return match_matrix
 
+def filter_duplicate_matches(idxs, idxs_alike_adjusted, kp1, kp2, duplicate_threshold=3.0):
+    """
+    Filter out duplicate ALIKE matches that are too close to SuperPoint matches.
+    
+    Args:
+        idxs: Tensor of shape (N, 2) containing SuperPoint match indices.
+        idxs_alike_adjusted: Tensor of shape (M, 2) containing ALIKE match indices.
+        kp1: Tensor of shape (K, 2) containing keypoints for image 1.
+        kp2: Tensor of shape (K, 2) containing keypoints for image 2.
+        duplicate_threshold: Float, pixel distance threshold for duplicates.
+    
+    Returns:
+        Tensor of combined non-duplicate matches.
+    """
+    # Get coordinates for SuperPoint matches
+    sp_coords1 = kp1[idxs[:, 0]]  # Shape: (N, 2)
+    sp_coords2 = kp2[idxs[:, 1]]  # Shape: (N, 2)
+    
+    # Get coordinates for ALIKE matches
+    alike_coords1 = kp1[idxs_alike_adjusted[:, 0]]  # Shape: (M, 2)
+    alike_coords2 = kp2[idxs_alike_adjusted[:, 1]]  # Shape: (M, 2)
+    
+    # Compute pairwise distances using broadcasting
+    # dist1: Distance between ALIKE points in image 1 and SuperPoint points in image 1
+    dist1 = torch.cdist(alike_coords1, sp_coords1, p=2)  # Shape: (M, N)
+    dist2 = torch.cdist(alike_coords2, sp_coords2, p=2)  # Shape: (M, N)
+    
+    # Check for duplicates: both distances must be below threshold
+    duplicate_mask = (dist1 < duplicate_threshold) & (dist2 < duplicate_threshold)
+    valid_mask = ~torch.any(duplicate_mask, dim=1)  # Shape: (M,)
+    
+    # Filter non-duplicate ALIKE matches
+    filtered_alike_matches = idxs_alike_adjusted[valid_mask]
+    
+    # Combine matches
+    combined_matches = torch.cat([idxs, filtered_alike_matches], dim=0)
+    
+    return combined_matches
+
 def match_with_gimlightglue_ensemble(lightglue_matcher, img_fnames, index_pairs, feature_dir='.featureout', 
                         device=torch.device('cpu'), min_matches=15, verbose=True, visualize=True):
     match_matrix = np.zeros((len(img_fnames), len(img_fnames)), dtype=np.int32)
@@ -392,7 +431,7 @@ def match_with_gimlightglue_ensemble(lightglue_matcher, img_fnames, index_pairs,
                         KF.laf_from_center_scale_ori(kp1[num_pts//2:][:fp_maks1[1]][None].float()),
                         KF.laf_from_center_scale_ori(kp2[num_pts//2:][:fp_maks2[1]][None].float()))
                 idxs_alike += num_pts//2
-                idxs = torch.cat([idxs, idxs_alike], dim=0)
+                idxs = filter_duplicate_matches(idxs, idxs_alike, kp1, kp2)
             if len(idxs) == 0:
                 continue
                 
@@ -736,10 +775,10 @@ for dataset, predictions in samples.items():
     # timings['feature_matching'].append(time() - t)
     # print(f'Features matched in {time() - t:.4f} sec')
 
-    lightglue_matcher = Lightglue_Matcher(device=device,num_features=2048)
+    lightglue_matcher = Lightglue_Matcher(device=device,num_features=4096)
     t = time()
     # detect_aliked(images, feature_dir, 4096, device=device)
-    detect_sp_ensemble(lightglue_matcher, images, feature_dir, 4096, device=device)
+    detect_sp_ensemble(lightglue_matcher, images, feature_dir, 8192, device=device)
     timings['feature_detection'].append(time() - t)
     print(f'Features detected in {time() - t:.4f} sec')
         
