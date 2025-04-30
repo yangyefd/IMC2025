@@ -372,10 +372,10 @@ def match_with_gimlightglue_ensemble(lightglue_matcher, img_fnames, index_pairs,
 
             num_pts = len(kp1)
             pred = {}
-            pred['keypoints0'] = kp1[None][:num_pts//2]
-            pred['keypoints1'] = kp2[None][:num_pts//2]
-            pred['descriptors0'] = desc1[None][:num_pts//2]
-            pred['descriptors1'] = desc2[None][:num_pts//2]
+            pred['keypoints0'] = kp1[:num_pts//2][None]
+            pred['keypoints1'] = kp2[:num_pts//2][None]
+            pred['descriptors0'] = desc1[:num_pts//2][None]
+            pred['descriptors1'] = desc2[:num_pts//2][None]
             pred['size0'] = torch.from_numpy(f_size[key1][...]).to(device)
             pred['size1'] = torch.from_numpy(f_size[key2][...]).to(device)
             pred['scale0'] = torch.from_numpy(f_scale[key1][...]).to(device)
