@@ -265,7 +265,8 @@ def detect_sp_ensemble(lightglue_matcher, img_fnames, feature_dir='.featureout',
     with h5py.File(f'{feature_dir}/keypoints.h5', mode='w') as f_kp, \
          h5py.File(f'{feature_dir}/descriptors.h5', mode='w') as f_desc, \
          h5py.File(f'{feature_dir}/size.h5', mode='w') as f_size,\
-         h5py.File(f'{feature_dir}/scale.h5', mode='w') as f_scale:
+         h5py.File(f'{feature_dir}/scale.h5', mode='w') as f_scale,\
+         h5py.File(f'{feature_dir}/mask.h5', mode='w') as f_mask:
         for img_path in tqdm(img_fnames):
             img_fname = img_path.split('/')[-1]
             img_fname = img_fname.split('\\')[-1]
@@ -274,18 +275,21 @@ def detect_sp_ensemble(lightglue_matcher, img_fnames, feature_dir='.featureout',
                 kpts = np.zeros((num_features,2))
                 descs = np.zeros((num_features,256))
                 feats0, data = lightglue_matcher.extract(img_path)
-                kpts[:num_features//2] = feats0['keypoints0'].reshape(-1, 2).detach().cpu().numpy()
-                descs[:num_features//2] = feats0['descriptors0'].reshape(num_features//2, -1).detach().cpu().numpy()
+                feats0_kpts = feats0['keypoints0'].reshape(-1, 2).detach().cpu().numpy()
+                kpts[:len(feats0_kpts)] = feats0['keypoints0'].reshape(-1, 2).detach().cpu().numpy()
+                descs[:len(feats0_kpts)] = feats0['descriptors0'].reshape(len(feats0_kpts), -1).detach().cpu().numpy()
 
                 image0 = load_torch_image(img_path, device=device).to(dtype)
                 feats0_alike = extractor_alike.extract(image0)
-                kpts[num_features//2:] = feats0_alike['keypoints'].reshape(-1, 2).detach().cpu().numpy()
-                descs[num_features//2:,:128] = feats0_alike['descriptors'].reshape(num_features//2, -1).detach().cpu().numpy()
+                feats0_alike_pkts = feats0_alike['keypoints'].reshape(-1, 2).detach().cpu().numpy()
+                kpts[num_features//2:num_features//2+len(feats0_alike_pkts)] = feats0_alike_pkts
+                descs[num_features//2:num_features//2+len(feats0_alike_pkts),:128] = feats0_alike['descriptors'].reshape(len(feats0_alike_pkts), -1).detach().cpu().numpy()
 
                 f_kp[key] = kpts
                 f_desc[key] = descs
                 f_size[key] = data['size0'].cpu()
                 f_scale[key] = data['scale0'].cpu()
+                f_mask[key] = np.array([len(feats0_kpts), len(feats0_alike_pkts)])
 
     return
 
@@ -358,6 +362,7 @@ def match_with_gimlightglue_ensemble(lightglue_matcher, img_fnames, index_pairs,
         h5py.File(f'{feature_dir}/descriptors.h5', mode='r') as f_desc, \
         h5py.File(f'{feature_dir}/size.h5', mode='r') as f_size, \
         h5py.File(f'{feature_dir}/scale.h5', mode='r') as f_scale, \
+        h5py.File(f'{feature_dir}/mask.h5', mode='r') as f_mask, \
         h5py.File(f'{feature_dir}/matches.h5', mode='w') as f_match:
         for pair_idx in tqdm(index_pairs):
             idx1, idx2 = pair_idx
@@ -369,22 +374,23 @@ def match_with_gimlightglue_ensemble(lightglue_matcher, img_fnames, index_pairs,
             kp2 = torch.from_numpy(f_kp[key2][...]).to(device)
             desc1 = torch.from_numpy(f_desc[key1][...]).to(device)
             desc2 = torch.from_numpy(f_desc[key2][...]).to(device)
-
+            fp_maks1 = np.array(f_mask[key1])
+            fp_maks2 = np.array(f_mask[key2])
             num_pts = len(kp1)
             pred = {}
-            pred['keypoints0'] = kp1[:num_pts//2][None]
-            pred['keypoints1'] = kp2[:num_pts//2][None]
-            pred['descriptors0'] = desc1[:num_pts//2][None]
-            pred['descriptors1'] = desc2[:num_pts//2][None]
+            pred['keypoints0'] = kp1[:num_pts//2][:fp_maks1[0]][None]
+            pred['keypoints1'] = kp2[:num_pts//2][:fp_maks2[0]][None]
+            pred['descriptors0'] = desc1[:num_pts//2][:fp_maks1[0]][None]
+            pred['descriptors1'] = desc2[:num_pts//2][:fp_maks2[0]][None]
             pred['size0'] = torch.from_numpy(f_size[key1][...]).to(device)
             pred['size1'] = torch.from_numpy(f_size[key2][...]).to(device)
             pred['scale0'] = torch.from_numpy(f_scale[key1][...]).to(device)
             pred['scale1'] = torch.from_numpy(f_scale[key2][...]).to(device)
             with torch.inference_mode():
                 dists, idxs = lightglue_matcher.match(pred)
-                _, idxs_alike = lg_matcher(desc1[num_pts//2:,:128].float(), desc2[num_pts//2:,:128].float(),
-                        KF.laf_from_center_scale_ori(kp1[num_pts//2:][None].float()),
-                        KF.laf_from_center_scale_ori(kp2[num_pts//2:][None].float()))
+                _, idxs_alike = lg_matcher(desc1[num_pts//2:,:128][:fp_maks1[1]].float(), desc2[num_pts//2:,:128][:fp_maks2][1].float(),
+                        KF.laf_from_center_scale_ori(kp1[num_pts//2:][:fp_maks1][1][None].float()),
+                        KF.laf_from_center_scale_ori(kp2[num_pts//2:][:fp_maks2][1][None].float()))
                 idxs_alike += num_pts//2
                 idxs = torch.cat([idxs, idxs_alike], dim=0)
             if len(idxs) == 0:
