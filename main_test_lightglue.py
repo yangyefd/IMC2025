@@ -388,9 +388,9 @@ def match_with_gimlightglue_ensemble(lightglue_matcher, img_fnames, index_pairs,
             pred['scale1'] = torch.from_numpy(f_scale[key2][...]).to(device)
             with torch.inference_mode():
                 dists, idxs = lightglue_matcher.match(pred)
-                _, idxs_alike = lg_matcher(desc1[num_pts//2:,:128][:fp_maks1[1]].float(), desc2[num_pts//2:,:128][:fp_maks2][1].float(),
-                        KF.laf_from_center_scale_ori(kp1[num_pts//2:][:fp_maks1][1][None].float()),
-                        KF.laf_from_center_scale_ori(kp2[num_pts//2:][:fp_maks2][1][None].float()))
+                _, idxs_alike = lg_matcher(desc1[num_pts//2:,:128][:fp_maks1[1]].float(), desc2[num_pts//2:,:128][:fp_maks2[1]].float(),
+                        KF.laf_from_center_scale_ori(kp1[num_pts//2:][:fp_maks1[1]][None].float()),
+                        KF.laf_from_center_scale_ori(kp2[num_pts//2:][:fp_maks2[1]][None].float()))
                 idxs_alike += num_pts//2
                 idxs = torch.cat([idxs, idxs_alike], dim=0)
             if len(idxs) == 0:
