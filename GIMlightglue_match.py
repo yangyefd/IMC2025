@@ -10,6 +10,8 @@ import torchvision.transforms.functional as F
 from os.path import join
 from networks.lightglue.superpoint import SuperPoint
 from networks.lightglue.models.matchers.lightglue import LightGlue
+from ultralytics import YOLO
+from data_process.person_mask import person_mask
 
 
 DEFAULT_MIN_NUM_MATCHES = 4
@@ -344,6 +346,10 @@ class Lightglue_Matcher():
             'checkpointed': True,
         })
 
+        
+        # 加载YOLOv8-Seg模型
+        model_yolo = YOLO("./models/yolov8n-seg.pt")  # 使用轻量级分割模型
+
         # weights path
         checkpoints_path = join('models', ckpt)
 
@@ -367,6 +373,7 @@ class Lightglue_Matcher():
 
         self.detector = detector.eval().to(device)
         self.model = model.eval().to(device)
+        self.model_yolo = model_yolo.eval().to(device)
 
     def extract(self, img_path0):
         device = self.device
@@ -393,6 +400,9 @@ class Lightglue_Matcher():
         
         return pred, data
 
+    def get_person_mask(self, img_path0):
+        return person_mask(img_path0, self.model_yolo)
+    
     # 修改Lightglue_Matcher类，添加更新模型的方法
     def update_model(self, new_model):
         """用微调后的模型更新当前模型"""

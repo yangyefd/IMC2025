@@ -43,6 +43,7 @@ from GIMlightglue_match import Lightglue_Matcher
 from fine_tune_lightglue import fine_tune_lightglue
 # from filter_match import adaptive_match_filtering
 from CLIP.clip import clip
+
 # Device setup
 device = K.utils.get_cuda_device_if_available(0)
 print(f'{device=}')
@@ -231,6 +232,47 @@ def visualize_matches(img1_path, img2_path, kpts1, kpts2, matches, save_path=Non
 
     cv2.imwrite(save_path, cv2.cvtColor(vis, cv2.COLOR_RGB2BGR))
 
+def detect_person(lightglue_matcher, img_fnames, feature_dir='.featureout', device=torch.device('cpu')):
+    #集成方法 ALIke sp各提一半点 2048个
+    dtype = torch.float32
+
+    if not os.path.isdir(feature_dir):
+        os.makedirs(feature_dir)
+
+    mask_lst = []
+    mask_dict = {}
+    for img_path in tqdm(img_fnames):
+        img_fname = img_path.split('/')[-1]
+        img_fname = img_fname.split('\\')[-1]
+        key = img_fname
+        with torch.inference_mode():
+            mask, mask_ratio, mask_num = lightglue_matcher.get_person_mask(img_path)
+            
+            if mask is not None:
+                mask_lst.append([key, mask, mask_ratio, mask_num])
+                mask_dict[key] = mask
+            else:
+                mask_dict[key] = np.zeros((0, 0), dtype=np.bool_)
+    mask_ratio_sum = 0
+    mask_num_sum = 0
+    for _, _, mask_ratio, mask_num in mask_lst:
+        mask_ratio_sum += mask_ratio
+        mask_num_sum += mask_num
+    mask_ratio_mean = mask_ratio_sum / len(mask_lst)
+    mask_num_mean = mask_num_sum / len(mask_lst)
+
+    if mask_ratio_mean > 0.15 and abs(mask_num_mean - 1) < 0.5:
+        mask_lst = []
+    with h5py.File(f'{feature_dir}/p_mask.h5', mode='w') as f_pmask:
+        for img_path in tqdm(img_fnames):
+            img_fname = img_path.split('/')[-1]
+            img_fname = img_fname.split('\\')[-1]
+            key = img_fname
+
+            f_pmask[key] = mask_dict[key] if len(mask_lst) > 0 else np.zeros((0, 0), dtype=np.bool_)
+            # print(f_pmask[key])
+    return
+
 def detect_sp(lightglue_matcher, img_fnames, feature_dir='.featureout', num_features=4096, 
                  resize_to=1024, device=torch.device('cpu')):
     dtype = torch.float32
@@ -265,7 +307,8 @@ def detect_sp_batch(lightglue_matcher, img_fnames, feature_dir='.featureout', nu
          h5py.File(f'{feature_dir}/descriptors.h5', mode='w') as f_desc, \
          h5py.File(f'{feature_dir}/size.h5', mode='w') as f_size,\
          h5py.File(f'{feature_dir}/scale.h5', mode='w') as f_scale,\
-         h5py.File(f'{feature_dir}/mask.h5', mode='w') as f_mask:
+         h5py.File(f'{feature_dir}/mask.h5', mode='w') as f_mask,\
+         h5py.File(f'{feature_dir}/p_mask.h5', mode='r') as f_pmask:
         for img_path in tqdm(img_fnames):
             img_fname = img_path.split('/')[-1]
             img_fname = img_fname.split('\\')[-1]
@@ -278,11 +321,16 @@ def detect_sp_batch(lightglue_matcher, img_fnames, feature_dir='.featureout', nu
                 kpts[:len(feats0_kpts)] = feats0['keypoints0'].reshape(-1, 2).detach().cpu().numpy()
                 descs[:len(feats0_kpts)] = feats0['descriptors0'].reshape(len(feats0_kpts), -1).detach().cpu().numpy()
 
-                f_kp[key] = kpts
-                f_desc[key] = descs
+                p_mask = f_pmask[key][...]
+                if len(p_mask) == 0:
+                    pts_mask = np.ones(len(kpts), dtype=np.bool_)
+                else:
+                    pts_mask = ~p_mask[kpts[:, 1].astype(np.int32), kpts[:, 0].astype(np.int32)]
+                f_kp[key] = kpts[pts_mask]
+                f_desc[key] = descs[pts_mask]
                 f_size[key] = data['size0'].cpu()
                 f_scale[key] = data['scale0'].cpu()
-                f_mask[key] = np.array([len(feats0_kpts)])
+                f_mask[key] = np.array([pts_mask.sum()])
 
     return
 
@@ -880,9 +928,9 @@ def match_with_gimlightglue_batch(lightglue_matcher, img_fnames, index_pairs, fe
 
                 pred = {
                     'keypoints0': kp1[:num_pts_h][None],
-                    'keypoints1': kp2[:num_pts_h][None],
+                    'keypoints1': kp2[:4096][None],
                     'descriptors0': desc1[:num_pts_h][None],
-                    'descriptors1': desc2[:num_pts_h][None],
+                    'descriptors1': desc2[:4096][None],
                     'size0': features_data[key1]['size'],
                     'size1': features_data[key2]['size'],
                     'scale0': features_data[key1]['scale'],
@@ -958,58 +1006,67 @@ def match_with_gimlightglue_batch(lightglue_matcher, img_fnames, index_pairs, fe
                     #         save_path
                     #     )
 
-            for pair_idx in tqdm(single_pairs_lst):
-                idx1, idx2 = pair_idx
-                fname1, fname2 = img_fnames[idx1], img_fnames[idx2]
-                key1, key2 = fname1.split('/')[-1], fname2.split('/')[-1]
-                key1 = key1.split('\\')[-1]
-                key2 = key2.split('\\')[-1]
-                kp1 = torch.from_numpy(f_kp[key1][...]).to(device)
-                kp2 = torch.from_numpy(f_kp[key2][...]).to(device)
-                desc1 = torch.from_numpy(f_desc[key1][...]).to(device)
-                desc2 = torch.from_numpy(f_desc[key2][...]).to(device)
-                fp_maks1 = np.array(f_mask[key1])
-                fp_maks2 = np.array(f_mask[key2])
-                num_pts = len(kp1)
-                pred = {}
-                pred['keypoints0'] = kp1[:num_pts//2][:fp_maks1[0]][None]
-                pred['keypoints1'] = kp2[:num_pts//2][:fp_maks2[0]][None]
-                pred['descriptors0'] = desc1[:num_pts//2][:fp_maks1[0]][None]
-                pred['descriptors1'] = desc2[:num_pts//2][:fp_maks2[0]][None]
-                pred['size0'] = torch.from_numpy(f_size[key1][...]).to(device)
-                pred['size1'] = torch.from_numpy(f_size[key2][...]).to(device)
-                pred['scale0'] = torch.from_numpy(f_scale[key1][...]).to(device)
-                pred['scale1'] = torch.from_numpy(f_scale[key2][...]).to(device)
-                with torch.inference_mode():
-                    dists, idxs = lightglue_matcher.match(pred)
-                if len(idxs) == 0:
-                    continue
-                    
-                #  # 应用区域筛选方法
-                # filtered_idxs = adaptive_match_filtering(
-                #     lightglue_matcher, kp1, kp2, idxs.cpu().numpy(), fname1, fname2, device
-                # )
-                # # 转回tensor
-                # if isinstance(filtered_idxs, np.ndarray):
-                #     idxs = torch.from_numpy(filtered_idxs).to(idxs.device)
+        for pair_idx in tqdm(single_pairs_lst):
+            idx1, idx2 = pair_idx
+            fname1, fname2 = img_fnames[idx1], img_fnames[idx2]
+            key1, key2 = fname1.split('/')[-1], fname2.split('/')[-1]
+            key1 = key1.split('\\')[-1]
+            key2 = key2.split('\\')[-1]
+            kp1 = features_data[key1]['kp']
+            kp2 = features_data[key2]['kp']
+            desc1 = features_data[key1]['desc']
+            desc2 = features_data[key2]['desc']
+            fp_maks1 = features_data[key1]['mask']
+            fp_maks2 = features_data[key2]['mask']
+            num_pts = len(kp1)
+            pred = {}
+            pred['keypoints0'] = kp1[:num_pts][:fp_maks1[0]][None]
+            pred['keypoints1'] = kp2[:4096][:fp_maks2[0]][None]
+            pred['descriptors0'] = desc1[:num_pts][:fp_maks1[0]][None]
+            pred['descriptors1'] = desc2[:4096][:fp_maks2[0]][None]
+            pred['size0'] = features_data[key1]['size']
+            pred['size1'] = features_data[key2]['size']
+            pred['scale0'] = features_data[key1]['scale']
+            pred['scale1'] = features_data[key2]['scale']
+            with torch.inference_mode():
+                dists, idxs = lightglue_matcher.match(pred)
 
-                n_matches = len(idxs)
-                if verbose:
-                    print(f'{key1}-{key2}: {n_matches} matches')
-                group = f_match.require_group(key1)
-                if n_matches >= min_matches:
-                    group.create_dataset(key2, data=idxs.detach().cpu().numpy().reshape(-1, 2))
-                    match_matrix[idx1,idx2] = len(idxs.detach().cpu().numpy().reshape(-1, 2))
-                                    # 添加可视化
-                    # if visualize:
-                    #     vis_dir = os.path.join(feature_dir, 'visualizations')
-                    #     os.makedirs(vis_dir, exist_ok=True)
-                    #     save_path = os.path.join(vis_dir, f'{key1}_{key2}_matches.png')
-                    #     visualize_matches(fname1, fname2, 
-                    #                    kp1.cpu().numpy(), 
-                    #                    kp2.cpu().numpy(),
-                    #                    idxs.cpu().numpy(),
-                    #                    save_path)
+                # 对 batch_idxs 按照 batch_dists 分数排序并保留最大的 1500 个匹配
+                if len(dists) > 0:
+                    sorted_indices = torch.argsort(dists, descending=True)
+                    sorted_dists = dists[sorted_indices]
+                    sorted_idxs_batch = idxs[sorted_indices]
+                    top_k = min(1500, len(sorted_dists))
+                    idxs = sorted_idxs_batch[:top_k]
+
+            if len(idxs) == 0:
+                continue
+                
+            #  # 应用区域筛选方法
+            # filtered_idxs = adaptive_match_filtering(
+            #     lightglue_matcher, kp1, kp2, idxs.cpu().numpy(), fname1, fname2, device
+            # )
+            # # 转回tensor
+            # if isinstance(filtered_idxs, np.ndarray):
+            #     idxs = torch.from_numpy(filtered_idxs).to(idxs.device)
+
+            n_matches = len(idxs)
+            if verbose:
+                print(f'{key1}-{key2}: {n_matches} matches')
+            group = f_match.require_group(key1)
+            if n_matches >= min_matches:
+                group.create_dataset(key2, data=idxs.detach().cpu().numpy().reshape(-1, 2))
+                match_matrix[idx1,idx2] = len(idxs.detach().cpu().numpy().reshape(-1, 2))
+                                # 添加可视化
+                # if visualize:
+                #     vis_dir = os.path.join(feature_dir, 'visualizations')
+                #     os.makedirs(vis_dir, exist_ok=True)
+                #     save_path = os.path.join(vis_dir, f'{key1}_{key2}_matches.png')
+                #     visualize_matches(fname1, fname2, 
+                #                    kp1.cpu().numpy(), 
+                #                    kp2.cpu().numpy(),
+                #                    idxs.cpu().numpy(),
+                #                    save_path)
 
     return match_matrix
 
@@ -1198,7 +1255,7 @@ for dataset, predictions in samples.items():
     t = time()
     # index_pairs = get_image_pairs_shortlist(images, sim_th=0.3, min_pairs=20, 
     #                                         exhaustive_if_less=20, device=device)
-    index_pairs = get_image_pairs_shortlist_clip(images, sim_th=0.75, min_pairs=1, 
+    index_pairs = get_image_pairs_shortlist_clip(images, sim_th=0.76, min_pairs=1, 
                                         exhaustive_if_less=20, device=device)
     timings['shortlisting'].append(time() - t)
     print(f'Shortlisting. Number of pairs to match: {len(index_pairs)}. Done in {time() - t:.4f} sec')
@@ -1215,6 +1272,12 @@ for dataset, predictions in samples.items():
     # print(f'Features matched in {time() - t:.4f} sec')
 
     lightglue_matcher = Lightglue_Matcher(device=device,num_features=5012)
+    
+    t = time()
+    # detect_aliked(images, feature_dir, 4096, device=device)
+    detect_person(lightglue_matcher, images, feature_dir, device=device)
+    print(f'person_mask in {time() - t:.4f} sec')
+
     t = time()
     # detect_aliked(images, feature_dir, 4096, device=device)
     detect_sp_batch(lightglue_matcher, images, feature_dir, 5012, device=device)
