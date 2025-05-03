@@ -262,7 +262,7 @@ def detect_person(lightglue_matcher, img_fnames, feature_dir='.featureout', devi
         mask_ratio_mean = mask_ratio_sum / len(mask_lst)
         mask_num_mean = mask_num_sum / len(mask_lst)
 
-        if mask_ratio_mean > 0.15 and abs(mask_num_mean - 1) < 0.5:
+        if (mask_ratio_mean > 0.15 and abs(mask_num_mean - 1) < 0.5) or len(mask_lst) < 3:
             mask_lst = []
     with h5py.File(f'{feature_dir}/p_mask.h5', mode='w') as f_pmask:
         for img_path in tqdm(img_fnames):
