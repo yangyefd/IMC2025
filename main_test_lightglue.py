@@ -253,16 +253,17 @@ def detect_person(lightglue_matcher, img_fnames, feature_dir='.featureout', devi
                 mask_dict[key] = mask
             else:
                 mask_dict[key] = np.zeros((0, 0), dtype=np.bool_)
-    mask_ratio_sum = 0
-    mask_num_sum = 0
-    for _, _, mask_ratio, mask_num in mask_lst:
-        mask_ratio_sum += mask_ratio
-        mask_num_sum += mask_num
-    mask_ratio_mean = mask_ratio_sum / len(mask_lst)
-    mask_num_mean = mask_num_sum / len(mask_lst)
+    if len(mask_lst) > 0:
+        mask_ratio_sum = 0
+        mask_num_sum = 0
+        for _, _, mask_ratio, mask_num in mask_lst:
+            mask_ratio_sum += mask_ratio
+            mask_num_sum += mask_num
+        mask_ratio_mean = mask_ratio_sum / len(mask_lst)
+        mask_num_mean = mask_num_sum / len(mask_lst)
 
-    if mask_ratio_mean > 0.15 and abs(mask_num_mean - 1) < 0.5:
-        mask_lst = []
+        if mask_ratio_mean > 0.15 and abs(mask_num_mean - 1) < 0.5:
+            mask_lst = []
     with h5py.File(f'{feature_dir}/p_mask.h5', mode='w') as f_pmask:
         for img_path in tqdm(img_fnames):
             img_fname = img_path.split('/')[-1]
@@ -1225,8 +1226,8 @@ if is_OneTest:
     ]
 else:
     dataset_train_test_lst = [
-        'ETs',
-        # 'stairs'
+        # 'ETs',
+        'stairs'
         # 'imc2023_heritage'
     ]
     
