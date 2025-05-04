@@ -304,7 +304,8 @@ def detect_sp_batch(lightglue_matcher, img_fnames, feature_dir='.featureout', nu
 
     if not os.path.isdir(feature_dir):
         os.makedirs(feature_dir)
-    with h5py.File(f'{feature_dir}/keypoints.h5', mode='w') as f_kp, \
+    with h5py.File(f'{feature_dir}/keypoints_coarse.h5', mode='w') as f_kp_coarse, \
+         h5py.File(f'{feature_dir}/keypoints.h5', mode='w') as f_kp, \
          h5py.File(f'{feature_dir}/descriptors.h5', mode='w') as f_desc, \
          h5py.File(f'{feature_dir}/size.h5', mode='w') as f_size,\
          h5py.File(f'{feature_dir}/scale.h5', mode='w') as f_scale,\
@@ -316,10 +317,12 @@ def detect_sp_batch(lightglue_matcher, img_fnames, feature_dir='.featureout', nu
             key = img_fname
             with torch.inference_mode():
                 kpts = np.zeros((num_features,2))
+                kpts_refine = np.zeros((num_features,2))
                 descs = np.zeros((num_features,256))
                 feats0, data = lightglue_matcher.extract(img_path)
                 feats0_kpts = feats0['keypoints0'].reshape(-1, 2).detach().cpu().numpy()
                 kpts[:len(feats0_kpts)] = feats0['keypoints0'].reshape(-1, 2).detach().cpu().numpy()
+                kpts_refine[:len(feats0_kpts)] = feats0['keypoints_refine0'].reshape(-1, 2).detach().cpu().numpy()
                 descs[:len(feats0_kpts)] = feats0['descriptors0'].reshape(len(feats0_kpts), -1).detach().cpu().numpy()
 
                 p_mask = f_pmask[key][...]
@@ -327,7 +330,8 @@ def detect_sp_batch(lightglue_matcher, img_fnames, feature_dir='.featureout', nu
                     pts_mask = np.ones(len(kpts), dtype=np.bool_)
                 else:
                     pts_mask = ~p_mask[kpts[:, 1].astype(np.int32), kpts[:, 0].astype(np.int32)]
-                f_kp[key] = kpts[pts_mask]
+                f_kp_coarse[key] = kpts[pts_mask]
+                f_kp[key] = kpts_refine[pts_mask]
                 f_desc[key] = descs[pts_mask]
                 f_size[key] = data['size0'].cpu()
                 f_scale[key] = data['scale0'].cpu()
@@ -846,7 +850,7 @@ def match_with_gimlightglue_ensemble_batch(lightglue_matcher, img_fnames, index_
 
 def match_with_gimlightglue_batch(lightglue_matcher, img_fnames, index_pairs, feature_dir='.featureout', 
                                            device=torch.device('cpu'), min_matches=15, batch_size=2, 
-                                           batch_points=2048, verbose=True, visualize=True):
+                                           tok_limit=1500, verbose=True, visualize=True):
     """
     使用批处理方式进行特征匹配，点数不会超过 max_points，但可能小于。
     对于点数相同的匹配对进行批处理，点数不同的匹配对单独处理。
@@ -869,7 +873,7 @@ def match_with_gimlightglue_batch(lightglue_matcher, img_fnames, index_pairs, fe
     # 加载特征数据
     print("加载特征数据...")
     features_data = {}
-    with h5py.File(f'{feature_dir}/keypoints.h5', mode='r') as f_kp, \
+    with h5py.File(f'{feature_dir}/keypoints_coarse.h5', mode='r') as f_kp, \
          h5py.File(f'{feature_dir}/descriptors.h5', mode='r') as f_desc, \
          h5py.File(f'{feature_dir}/size.h5', mode='r') as f_size, \
          h5py.File(f'{feature_dir}/scale.h5', mode='r') as f_scale, \
@@ -970,7 +974,7 @@ def match_with_gimlightglue_batch(lightglue_matcher, img_fnames, index_pairs, fe
                     sorted_indices = torch.argsort(dists, descending=True)
                     sorted_dists = dists[sorted_indices]
                     sorted_idxs_batch = idxs[sorted_indices]
-                    top_k = min(1500, len(sorted_dists))
+                    top_k = min(tok_limit, len(sorted_dists))
                     sorted_idxs.append(sorted_idxs_batch[:top_k])
                 else:
                     sorted_idxs.append([])
@@ -994,18 +998,18 @@ def match_with_gimlightglue_batch(lightglue_matcher, img_fnames, index_pairs, fe
                     group.create_dataset(key2, data=idxs.detach().cpu().numpy().reshape(-1, 2))
                     match_matrix[idx1, idx2] = n_matches
                     
-                    # # 可视化匹配
-                    # if visualize:
-                    #     vis_dir = os.path.join(feature_dir, 'visualizations')
-                    #     os.makedirs(vis_dir, exist_ok=True)
-                    #     save_path = os.path.join(vis_dir, f'{key1}_{key2}_matches.png')
-                    #     visualize_matches(
-                    #         fname1, fname2,
-                    #         features_data[key1]['kp'].cpu().numpy(),
-                    #         features_data[key2]['kp'].cpu().numpy(),
-                    #         idxs.cpu().numpy(),
-                    #         save_path
-                    #     )
+                    # 可视化匹配
+                    if visualize:
+                        vis_dir = os.path.join(feature_dir, 'visualizations')
+                        os.makedirs(vis_dir, exist_ok=True)
+                        save_path = os.path.join(vis_dir, f'{key1}_{key2}_matches.png')
+                        visualize_matches(
+                            fname1, fname2,
+                            features_data[key1]['kp'].cpu().numpy(),
+                            features_data[key2]['kp'].cpu().numpy(),
+                            idxs.cpu().numpy(),
+                            save_path
+                        )
 
         for pair_idx in tqdm(single_pairs_lst):
             idx1, idx2 = pair_idx
@@ -1037,7 +1041,7 @@ def match_with_gimlightglue_batch(lightglue_matcher, img_fnames, index_pairs, fe
                     sorted_indices = torch.argsort(dists, descending=True)
                     sorted_dists = dists[sorted_indices]
                     sorted_idxs_batch = idxs[sorted_indices]
-                    top_k = min(1500, len(sorted_dists))
+                    top_k = min(tok_limit, len(sorted_dists))
                     idxs = sorted_idxs_batch[:top_k]
 
             if len(idxs) == 0:
@@ -1059,15 +1063,15 @@ def match_with_gimlightglue_batch(lightglue_matcher, img_fnames, index_pairs, fe
                 group.create_dataset(key2, data=idxs.detach().cpu().numpy().reshape(-1, 2))
                 match_matrix[idx1,idx2] = len(idxs.detach().cpu().numpy().reshape(-1, 2))
                                 # 添加可视化
-                # if visualize:
-                #     vis_dir = os.path.join(feature_dir, 'visualizations')
-                #     os.makedirs(vis_dir, exist_ok=True)
-                #     save_path = os.path.join(vis_dir, f'{key1}_{key2}_matches.png')
-                #     visualize_matches(fname1, fname2, 
-                #                    kp1.cpu().numpy(), 
-                #                    kp2.cpu().numpy(),
-                #                    idxs.cpu().numpy(),
-                #                    save_path)
+                if visualize:
+                    vis_dir = os.path.join(feature_dir, 'visualizations')
+                    os.makedirs(vis_dir, exist_ok=True)
+                    save_path = os.path.join(vis_dir, f'{key1}_{key2}_matches.png')
+                    visualize_matches(fname1, fname2, 
+                                   kp1.cpu().numpy(), 
+                                   kp2.cpu().numpy(),
+                                   idxs.cpu().numpy(),
+                                   save_path)
 
     return match_matrix
 
@@ -1176,7 +1180,7 @@ class Prediction:
 
 # Main processing
 is_train = True
-is_OneTest = False
+is_OneTest = True
 data_dir = '../image-matching-challenge-2025'
 workdir = './results'
 os.makedirs(workdir, exist_ok=True)
@@ -1222,7 +1226,7 @@ print(f"Extracting on device {device}")
 if is_OneTest:
     dataset_train_test_lst = [
         'ETs_one',
-        'stairs_one'
+        # 'stairs_one'
     ]
 else:
     dataset_train_test_lst = [

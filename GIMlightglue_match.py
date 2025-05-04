@@ -338,6 +338,7 @@ class Lightglue_Matcher():
             'force_num_keypoints': True,
             'detection_threshold': 0.0,
             'nms_radius': 3,
+            "refinement_radius": 3,
             'trainable': False,
         })
         model = LightGlue({
@@ -397,6 +398,7 @@ class Lightglue_Matcher():
                 "image": data["gray0"],
             }).items()})
         pred['keypoints0'] = torch.cat([kp * s for kp, s in zip(pred['keypoints0'], data['scale0'][:, None])])
+        pred['keypoints_refine0'] = torch.cat([kp * s for kp, s in zip(pred['keypoints_refine0'], data['scale0'][:, None])])
         
         return pred, data
 

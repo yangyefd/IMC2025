@@ -302,12 +302,15 @@ class SuperPoint(BaseModel):
                 keypoints, scores = list(keypoints), list(scores)
 
             if self.conf["refinement_radius"] > 0:
-                keypoints = soft_argmax_refinement(
+                keypoints_refine = soft_argmax_refinement(
                     keypoints, dense_scores, self.conf["refinement_radius"]
                 )
+            else:
+                keypoints_refine = keypoints
 
             # Convert (h, w) to (x, y)
             keypoints = [torch.flip(k, [1]).float() for k in keypoints]
+            keypoints_refine = [torch.flip(k, [1]).float() for k in keypoints_refine]
 
             if self.conf.force_num_keypoints:
                 keypoints = pad_and_stack(
@@ -322,9 +325,22 @@ class SuperPoint(BaseModel):
                         .item(),
                     ),
                 )
+                keypoints_refine = pad_and_stack(
+                    keypoints_refine,
+                    max_kps,
+                    -2,
+                    mode="random_c",
+                    bounds=(
+                        0,
+                        data.get("image_size", torch.tensor(image.shape[-2:]))
+                        .min()
+                        .item(),
+                    ),
+                )
                 scores = pad_and_stack(scores, max_kps, -1, mode="zeros")
             else:
                 keypoints = torch.stack(keypoints, 0)
+                keypoints_refine = torch.stack(keypoints_refine, 0)
                 scores = torch.stack(scores, 0)
 
             # Extract descriptors
@@ -348,6 +364,7 @@ class SuperPoint(BaseModel):
 
             pred = {
                 "keypoints": keypoints + 0.5,
+                "keypoints_refine": keypoints_refine + 0.5,
                 "descriptors": desc.transpose(-1, -2),
             }
 
