@@ -12,6 +12,9 @@ from networks.lightglue.superpoint import SuperPoint
 from networks.lightglue.models.matchers.lightglue import LightGlue
 from ultralytics import YOLO
 from data_process.person_mask import person_mask
+from networks.loftr.loftr import LoFTR
+from networks.loftr.misc import lower_config
+from networks.loftr.config import get_cfg_defaults
 
 
 DEFAULT_MIN_NUM_MATCHES = 4
@@ -332,6 +335,7 @@ class Lightglue_Matcher():
         model = None
 
         ckpt = 'gim_lightglue_100h.ckpt'
+        checkpoints_path_loftr = 'gim_loftr_50h.ckpt'
 
         detector = SuperPoint({
             'max_num_keypoints': num_features,
@@ -347,7 +351,14 @@ class Lightglue_Matcher():
             'checkpointed': True,
         })
 
-        
+
+        model_loftr = LoFTR(lower_config(get_cfg_defaults())['loftr'])
+
+        state_dict_loft = torch.load(checkpoints_path_loftr, map_location='cpu')
+        if 'state_dict' in state_dict_loft.keys(): state_dict_loft = state_dict_loft['state_dict']
+        model_loftr.load_state_dict(state_dict_loft)
+
+
         # 加载YOLOv8-Seg模型
         model_yolo = YOLO("./models/yolov8n-seg.pt")  # 使用轻量级分割模型
 
@@ -375,6 +386,16 @@ class Lightglue_Matcher():
         self.detector = detector.eval().to(device)
         self.model = model.eval().to(device)
         self.model_yolo = model_yolo.eval().to(device)
+        self.model_loftr = model_loftr.eval().to(device)
+
+    def loftr_match(self, pred_in):
+        with torch.no_grad():
+            self.model_loftr(data)
+        kpts0 = data['mkpts0_f']
+        kpts1 = data['mkpts1_f']
+        b_ids = data['m_bids']
+        mconf = data['mconf']
+
 
     def extract(self, img_path0):
         device = self.device
