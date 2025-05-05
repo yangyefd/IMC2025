@@ -311,7 +311,7 @@ class SuperPoint(BaseModel):
             # Convert (h, w) to (x, y)
             keypoints = [torch.flip(k, [1]).float() for k in keypoints]
             keypoints_refine = [torch.flip(k, [1]).float() for k in keypoints_refine]
-
+ 
             if self.conf.force_num_keypoints:
                 keypoints = pad_and_stack(
                     keypoints,

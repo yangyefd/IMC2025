@@ -12,6 +12,9 @@ from networks.lightglue.superpoint import SuperPoint
 from networks.lightglue.models.matchers.lightglue import LightGlue
 from ultralytics import YOLO
 from data_process.person_mask import person_mask
+from networks.loftr.loftr import LoFTR
+from networks.loftr.misc import lower_config
+from networks.loftr.config import get_cfg_defaults
 
 
 DEFAULT_MIN_NUM_MATCHES = 4
@@ -169,6 +172,56 @@ def preprocess(image: np.ndarray, grayscale: bool = False, resize_max: int = Non
             image.shape[-2:]))
     image = F.resize(image, size=size_new)
     scale = np.array(size) / np.array(size_new)[::-1]
+    return image, scale
+
+
+def preprocess_loftr(image: np.ndarray, grayscale: bool = False, resize_max: int = 640, dfactor: int = 8):
+    """
+    预处理图像以适配 LoFTR 模型。
+    - 如果图像尺寸超过 resize_max，则调整大小。
+    - 确保图像尺寸可以被 dfactor 整除。
+
+    Args:
+        image (np.ndarray): 输入图像。
+        grayscale (bool): 是否为灰度图像。
+        resize_max (int): 最大尺寸限制。
+        dfactor (int): 尺寸必须是 dfactor 的倍数。
+
+    Returns:
+        torch.Tensor: 预处理后的图像。
+        np.ndarray: 缩放比例。
+    """
+    image = image.astype(np.float32, copy=False)
+    size = image.shape[:2][::-1]  # (宽, 高)
+    scale = np.array([1.0, 1.0])
+
+    # 如果图像尺寸超过 resize_max，则调整大小
+    if resize_max:
+        max_dim = max(size)
+        if max_dim > resize_max:
+            scale = resize_max / max_dim
+            size_new = tuple(int(round(x * scale)) for x in size)
+            image = resize_image(image, size_new, 'cv2_area')
+            scale = np.array(size) / np.array(size_new)
+
+    # 如果是灰度图像，调整维度
+    if grayscale:
+        assert image.ndim == 2, f"Expected 2D grayscale image, got shape {image.shape}"
+        image = image[None]  # 添加通道维度
+    else:
+        image = image.transpose((2, 0, 1))  # HxWxC 转为 CxHxW
+
+    # 转换为 PyTorch 张量并归一化到 [0, 1]
+    image = torch.from_numpy(image / 255.0).float()
+
+    # 确保图像尺寸可以被 dfactor 整除
+    size_new = tuple(map(
+        lambda x: int(x // dfactor * dfactor),
+        image.shape[-2:]
+    ))
+    image = F.resize(image, size=size_new)
+    scale = np.array(size) / np.array(size_new)[::-1]
+
     return image, scale
 
 
@@ -332,6 +385,7 @@ class Lightglue_Matcher():
         model = None
 
         ckpt = 'gim_lightglue_100h.ckpt'
+        checkpoints_path_loftr = './models/gim_loftr_50h.ckpt'
 
         detector = SuperPoint({
             'max_num_keypoints': num_features,
@@ -347,7 +401,14 @@ class Lightglue_Matcher():
             'checkpointed': True,
         })
 
-        
+
+        model_loftr = LoFTR(lower_config(get_cfg_defaults())['loftr'])
+
+        state_dict_loft = torch.load(checkpoints_path_loftr, map_location='cpu')
+        if 'state_dict' in state_dict_loft.keys(): state_dict_loft = state_dict_loft['state_dict']
+        model_loftr.load_state_dict(state_dict_loft)
+
+
         # 加载YOLOv8-Seg模型
         model_yolo = YOLO("./models/yolov8n-seg.pt")  # 使用轻量级分割模型
 
@@ -375,6 +436,54 @@ class Lightglue_Matcher():
         self.detector = detector.eval().to(device)
         self.model = model.eval().to(device)
         self.model_yolo = model_yolo.eval().to(device)
+        self.model_loftr = model_loftr.eval().to(device)
+
+    def loftr_extract(self, img_path0, resize=False):
+        device = self.device
+        image0_ori = read_image(img_path0)
+        if resize:
+            image0, scale0 = preprocess_loftr(image0_ori)
+        else:
+            image0, scale0 = preprocess(image0_ori)
+
+        image0 = image0.to(device)[None]
+        scale0 = torch.tensor(scale0).to(device)[None]
+
+        data = {}
+        data.update(dict(image0=image0))
+
+        size0 = torch.tensor(data["image0"].shape[-2:])
+
+        data.update(dict(size0=size0))
+        data.update(dict(scale0=scale0))
+
+
+        with torch.no_grad():
+            feat_c0, feat_f0 = self.model_loftr.extract({
+                "image0": data["image0"],
+            })
+        return feat_c0, feat_f0, data
+
+    def loftr_match(self, data):
+        with torch.no_grad():
+            with torch.cuda.amp.autocast():
+                self.model_loftr.forward_match(data)
+        kpts0 = data['mkpts0_f']
+        kpts1 = data['mkpts1_f']
+        b_ids = data['m_bids']
+        mconf = data['mconf']
+
+        return mconf, kpts0, kpts1
+
+    def loftr_refine(self, data):
+        with torch.no_grad():
+            with torch.cuda.amp.autocast():
+                self.model_loftr.forward_fine(data)
+        kpts0 = data['mkpts0_f']
+        kpts1 = data['mkpts1_f']
+        mconf = data['mconf']
+
+        return mconf, kpts0, kpts1
 
     def extract(self, img_path0):
         device = self.device
