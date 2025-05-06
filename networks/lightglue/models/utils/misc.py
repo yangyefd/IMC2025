@@ -2,6 +2,10 @@ import math
 from typing import List, Optional, Tuple
 
 import torch
+torch.manual_seed(42)  # 固定 CPU 的随机种子
+if torch.cuda.is_available():
+    torch.cuda.manual_seed(42)  # 固定 GPU 的随机种子
+    torch.cuda.manual_seed_all(42)  # 如果有多个 GPU，固定所有 GPU 的随机种子
 
 
 def to_sequence(map):

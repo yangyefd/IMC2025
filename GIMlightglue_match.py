@@ -392,7 +392,7 @@ class Lightglue_Matcher():
             'force_num_keypoints': True,
             'detection_threshold': 0.0,
             'nms_radius': 3,
-            "refinement_radius": 3,
+            "refinement_radius": 0,
             'trainable': False,
         })
         model = LightGlue({

@@ -48,6 +48,23 @@ from CLIP.clip import clip
 device = K.utils.get_cuda_device_if_available(0)
 print(f'{device=}')
 
+def set_seed(seed=42):
+    import random
+    import numpy as np
+    import torch
+
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+# 在主程序开始时调用
+set_seed(42)
+
 def load_torch_image(fname, device=torch.device('cpu')):
     img = K.io.load_image(fname, K.io.ImageLoadType.RGB32, device=device)[None, ...]
     return img
@@ -331,7 +348,7 @@ def detect_sp_batch(lightglue_matcher, img_fnames, feature_dir='.featureout', nu
                 else:
                     pts_mask = ~p_mask[kpts[:, 1].astype(np.int32), kpts[:, 0].astype(np.int32)]
                 f_kp_coarse[key] = kpts[pts_mask]
-                f_kp[key] = kpts_refine[pts_mask]
+                f_kp[key] = kpts[pts_mask]
                 f_desc[key] = descs[pts_mask]
                 f_size[key] = data['size0'].cpu()
                 f_scale[key] = data['scale0'].cpu()
@@ -1113,15 +1130,15 @@ def match_with_gimlightglue_batch(lightglue_matcher, img_fnames, index_pairs, fe
                 group.create_dataset(key2, data=idxs.detach().cpu().numpy().reshape(-1, 2))
                 match_matrix[idx1,idx2] = len(idxs.detach().cpu().numpy().reshape(-1, 2))
                                 # 添加可视化
-                if visualize:
-                    vis_dir = os.path.join(feature_dir, 'visualizations')
-                    os.makedirs(vis_dir, exist_ok=True)
-                    save_path = os.path.join(vis_dir, f'{key1}_{key2}_matches.png')
-                    visualize_matches(fname1, fname2, 
-                                   kp1.cpu().numpy(), 
-                                   kp2.cpu().numpy(),
-                                   idxs.cpu().numpy(),
-                                   save_path)
+                # if visualize:
+                #     vis_dir = os.path.join(feature_dir, 'visualizations')
+                #     os.makedirs(vis_dir, exist_ok=True)
+                #     save_path = os.path.join(vis_dir, f'{key1}_{key2}_matches.png')
+                #     visualize_matches(fname1, fname2, 
+                #                    kp1.cpu().numpy(), 
+                #                    kp2.cpu().numpy(),
+                #                    idxs.cpu().numpy(),
+                #                    save_path)
 
     return match_matrix
 
@@ -1513,7 +1530,7 @@ def loftr_feature(lightglue_matcher, img_fnames, feature_dir='.featureout', devi
     return
 
 class PointIndexer:
-    def __init__(self, coord_tolerance=0.01):
+    def __init__(self, coord_tolerance=0.0001):
         """
         coord_tolerance: 匹配坐标时的精度容忍度（单位：像素），例如 0.5 表示将坐标四舍五入到 0.5 像素内。
         """
@@ -1714,8 +1731,8 @@ if is_OneTest:
     ]
 else:
     dataset_train_test_lst = [
-        # 'ETs',
-        'stairs'
+        'ETs',
+        # 'stairs'
         # 'imc2023_heritage'
     ]
     
@@ -1760,7 +1777,7 @@ for dataset, predictions in samples.items():
     # timings['feature_matching'].append(time() - t)
     # print(f'Features matched in {time() - t:.4f} sec')
 
-    lightglue_matcher = Lightglue_Matcher(device=device,num_features=4096)
+    lightglue_matcher = Lightglue_Matcher(device=device,num_features=1024)
     
     t = time()
     # detect_aliked(images, feature_dir, 4096, device=device)
@@ -1769,7 +1786,7 @@ for dataset, predictions in samples.items():
 
     t = time()
     # detect_aliked(images, feature_dir, 4096, device=device)
-    detect_sp_batch_refine(lightglue_matcher, images, feature_dir, 4096, device=device)
+    detect_sp_batch(lightglue_matcher, images, feature_dir, 1024, device=device)
     timings['feature_detection'].append(time() - t)
     print(f'Features detected in {time() - t:.4f} sec')
 
@@ -1800,7 +1817,7 @@ for dataset, predictions in samples.items():
 
     t = time()
     # match_matrix = match_with_gimloftr(lightglue_matcher, images, index_pairs, feature_dir=feature_dir, device=device, verbose=False)
-    match_matrix = match_with_gimlightglue_batch_refine(lightglue_matcher, images, index_pairs, feature_dir=feature_dir, device=device, verbose=False)
+    match_matrix = match_with_gimlightglue_batch(lightglue_matcher, images, index_pairs, feature_dir=feature_dir, device=device, verbose=False)
     timings['feature_matching'].append(time() - t)
     print(f'Features matched in {time() - t:.4f} sec')
     print('match_matrix', match_matrix.sum())
@@ -1828,6 +1845,7 @@ for dataset, predictions in samples.items():
     mapper_options = pycolmap.IncrementalPipelineOptions()
     mapper_options.min_model_size = 3
     mapper_options.max_num_models = 25
+    mapper_options.num_threads = 1
     os.makedirs(output_path, exist_ok=True)
     t = time()
     maps = pycolmap.incremental_mapping(database_path=database_path, 
