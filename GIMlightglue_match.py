@@ -389,9 +389,9 @@ class Lightglue_Matcher():
 
         detector = SuperPoint({
             'max_num_keypoints': num_features,
-            'force_num_keypoints': True,
+            'force_num_keypoints': False,
             'detection_threshold': 0.0,
-            'nms_radius': 3,
+            'nms_radius': 5,
             "refinement_radius": 0,
             'trainable': False,
         })
@@ -479,8 +479,8 @@ class Lightglue_Matcher():
         with torch.no_grad():
             with torch.cuda.amp.autocast():
                 self.model_loftr.forward_fine(data)
-        kpts0 = data['mkpts0_f']
-        kpts1 = data['mkpts1_f']
+        kpts0 = data['mkpts0_c']
+        kpts1 = data['mkpts1_c']
         mconf = data['mconf']
 
         return mconf, kpts0, kpts1

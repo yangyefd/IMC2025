@@ -1061,22 +1061,32 @@ def match_with_gimlightglue_batch(lightglue_matcher, img_fnames, index_pairs, fe
                 
                 # 保存匹配结果
                 if n_matches >= min_matches:
-                    group = f_match.require_group(key1)
-                    group.create_dataset(key2, data=idxs.detach().cpu().numpy().reshape(-1, 2))
-                    match_matrix[idx1, idx2] = n_matches
-                    
-                    # 可视化匹配
-                    if visualize:
-                        vis_dir = os.path.join(feature_dir, 'visualizations')
-                        os.makedirs(vis_dir, exist_ok=True)
-                        save_path = os.path.join(vis_dir, f'{key1}_{key2}_matches.png')
-                        visualize_matches(
-                            fname1, fname2,
-                            features_data[key1]['kp'].cpu().numpy(),
-                            features_data[key2]['kp'].cpu().numpy(),
-                            idxs.cpu().numpy(),
-                            save_path
-                        )
+                    # kpts0 = features_data[key1]['kp'][idxs[:,0]]
+                    # kpts1 = features_data[key2]['kp'][idxs[:,1]]
+                    # # robust fitting
+                    # _, mask = cv2.findFundamentalMat(kpts0.cpu().detach().numpy(),
+                    #                                 kpts1.cpu().detach().numpy(),
+                    #                                 cv2.USAC_MAGSAC, ransacReprojThreshold=1.0,
+                    #                                 confidence=0.999999, maxIters=10000)
+                    # mask = mask.ravel() > 0
+                    # idxs = idxs[mask]
+                    if len(idxs) >= min_matches:
+                        group = f_match.require_group(key1)
+                        group.create_dataset(key2, data=idxs.detach().cpu().numpy().reshape(-1, 2))
+                        match_matrix[idx1, idx2] = n_matches
+                        
+                        # 可视化匹配
+                        if visualize:
+                            vis_dir = os.path.join(feature_dir, 'visualizations')
+                            os.makedirs(vis_dir, exist_ok=True)
+                            save_path = os.path.join(vis_dir, f'{key1}_{key2}_matches.png')
+                            visualize_matches(
+                                fname1, fname2,
+                                features_data[key1]['kp'].cpu().numpy(),
+                                features_data[key2]['kp'].cpu().numpy(),
+                                idxs.cpu().numpy(),
+                                save_path
+                            )
 
         for pair_idx in tqdm(single_pairs_lst):
             idx1, idx2 = pair_idx
@@ -1141,6 +1151,62 @@ def match_with_gimlightglue_batch(lightglue_matcher, img_fnames, index_pairs, fe
                 #                    save_path)
 
     return match_matrix
+
+def visualize_refine_matches(img1_path, img2_path, mkpts0_c, mkpts1_c, kpts0, kpts1, save_path=None, show=True):
+    """
+    可视化 refine 前后的点匹配关系。
+    
+    Args:
+        img1_path: 第一张图片路径。
+        img2_path: 第二张图片路径。
+        mkpts0_c: refine 前的第一张图片的匹配点 (Nx2)。
+        mkpts1_c: refine 前的第二张图片的匹配点 (Nx2)。
+        kpts0: refine 后的第一张图片的匹配点 (Mx2)。
+        kpts1: refine 后的第二张图片的匹配点 (Mx2)。
+        save_path: 保存路径，如果为 None 则不保存。
+        show: 是否显示图像。
+    """
+    # 读取图像
+    img1 = cv2.imread(img1_path)
+    img2 = cv2.imread(img2_path)
+    img1 = cv2.cvtColor(img1, cv2.COLOR_BGR2RGB)
+    img2 = cv2.cvtColor(img2, cv2.COLOR_BGR2RGB)
+
+    # 获取图像高度和宽度
+    h1, w1 = img1.shape[:2]
+    h2, w2 = img2.shape[:2]
+
+    # 创建拼接图像
+    canvas = np.zeros((max(h1, h2), w1 + w2, 3), dtype=np.uint8)
+    canvas[:h1, :w1, :] = img1
+    canvas[:h2, w1:w1 + w2, :] = img2
+
+    # 偏移量
+    offset = np.array([w1, 0])
+
+    # 绘制 refine 前的匹配点
+    for idx, (pt1, pt2) in enumerate(zip(mkpts0_c, mkpts1_c)):
+        pt1 = tuple(map(int, pt1))
+        pt2 = tuple(map(int, pt2 + offset))
+        cv2.circle(canvas, pt1, 3, (255, 0, 0), -1)  # 蓝色点
+        cv2.circle(canvas, pt2, 3, (255, 0, 0), -1)
+        cv2.line(canvas, pt1, pt2, (255, 0, 0), 1)  # 蓝色线
+        if idx > 10:
+            break
+
+    # 绘制 refine 后的匹配点
+    for idx, (pt1, pt2) in enumerate(zip(kpts0, kpts1)):
+        pt1 = tuple(map(int, pt1))
+        pt2 = tuple(map(int, pt2 + offset))
+        cv2.circle(canvas, pt1, 3, (0, 255, 0), -1)  # 绿色点
+        cv2.circle(canvas, pt2, 3, (0, 255, 0), -1)
+        cv2.line(canvas, pt1, pt2, (0, 255, 0), 1)  # 绿色线
+        if idx > 10:
+            break
+
+    # 显示或保存图像
+    plt.imsave(save_path, canvas)
+
 
 def match_with_gimlightglue_batch_refine(lightglue_matcher, img_fnames, index_pairs, feature_dir='.featureout', 
                                            device=torch.device('cpu'), min_matches=15, batch_size=2, 
@@ -1320,18 +1386,21 @@ def match_with_gimlightglue_batch_refine(lightglue_matcher, img_fnames, index_pa
                     group.create_dataset(key2, data=idxs.reshape(-1, 2))
                     match_matrix[idx1, idx2] = n_matches
                     
+                    # visualize_refine_matches(fname1, fname2, mkpts0_f, mkpts1_f, kpts0, kpts1, save_path)
                     # # 可视化匹配
-                    # if visualize:
-                    #     vis_dir = os.path.join(feature_dir, 'visualizations')
-                    #     os.makedirs(vis_dir, exist_ok=True)
-                    #     save_path = os.path.join(vis_dir, f'{key1}_{key2}_matches.png')
-                    #     visualize_matches(
-                    #         fname1, fname2,
-                    #         kpts0.cpu().numpy(), 
-                    #         kpts1.cpu().numpy(),
-                    #         np.stack((np.arange(0,len(kpts0)),np.arange(0,len(kpts0))),axis=1),
-                    #         save_path
-                    #     )
+                    if visualize:
+                        vis_dir = os.path.join(feature_dir, 'visualizations')
+                        os.makedirs(vis_dir, exist_ok=True)
+                        save_path = os.path.join(vis_dir, f'{key1}_{key2}_matches.png')
+
+                        visualize_refine_matches(fname1, fname2, mkpts0_f.cpu().numpy(), mkpts1_f.cpu().numpy(), kpts0.cpu().numpy(), kpts1.cpu().numpy(), save_path)
+                        # visualize_matches(
+                        #     fname1, fname2,
+                        #     kpts0.cpu().numpy(), 
+                        #     kpts1.cpu().numpy(),
+                        #     np.stack((np.arange(0,len(kpts0)),np.arange(0,len(kpts0))),axis=1),
+                        #     save_path
+                        # )
 
         for pair_idx in tqdm(single_pairs_lst):
             idx1, idx2 = pair_idx
@@ -1425,7 +1494,7 @@ def match_with_gimlightglue_batch_refine(lightglue_matcher, img_fnames, index_pa
     with h5py.File(kp_path, mode='w') as f_kp:
         for image_key, coords in indexer.image_point_index.items():
             pts = np.array(coords).astype(np.float32)
-            # print(f'Image {image_key}: {len(pts)} points')
+            print(f'Image {image_key}: {len(pts)} points')
             f_kp[image_key] = pts
 
     return match_matrix
@@ -1530,7 +1599,7 @@ def loftr_feature(lightglue_matcher, img_fnames, feature_dir='.featureout', devi
     return
 
 class PointIndexer:
-    def __init__(self, coord_tolerance=0.0001):
+    def __init__(self, coord_tolerance=1.5):
         """
         coord_tolerance: 匹配坐标时的精度容忍度（单位：像素），例如 0.5 表示将坐标四舍五入到 0.5 像素内。
         """
@@ -1569,6 +1638,7 @@ class PointIndexer:
         coord: (x, y)
         """
         rounded = self._round_coord(coord)
+        coord = (rounded[0] * self.coord_tolerance, rounded[1] * self.coord_tolerance)
         hash_key = (image_key, rounded[0], rounded[1])
 
         if image_key not in self.image_dict:
@@ -1732,7 +1802,7 @@ if is_OneTest:
 else:
     dataset_train_test_lst = [
         'ETs',
-        # 'stairs'
+        'stairs'
         # 'imc2023_heritage'
     ]
     
@@ -1777,7 +1847,7 @@ for dataset, predictions in samples.items():
     # timings['feature_matching'].append(time() - t)
     # print(f'Features matched in {time() - t:.4f} sec')
 
-    lightglue_matcher = Lightglue_Matcher(device=device,num_features=1024)
+    lightglue_matcher = Lightglue_Matcher(device=device,num_features=4096)
     
     t = time()
     # detect_aliked(images, feature_dir, 4096, device=device)
@@ -1786,7 +1856,7 @@ for dataset, predictions in samples.items():
 
     t = time()
     # detect_aliked(images, feature_dir, 4096, device=device)
-    detect_sp_batch(lightglue_matcher, images, feature_dir, 1024, device=device)
+    detect_sp_batch_refine(lightglue_matcher, images, feature_dir, 4096, device=device)
     timings['feature_detection'].append(time() - t)
     print(f'Features detected in {time() - t:.4f} sec')
 
@@ -1817,7 +1887,7 @@ for dataset, predictions in samples.items():
 
     t = time()
     # match_matrix = match_with_gimloftr(lightglue_matcher, images, index_pairs, feature_dir=feature_dir, device=device, verbose=False)
-    match_matrix = match_with_gimlightglue_batch(lightglue_matcher, images, index_pairs, feature_dir=feature_dir, device=device, verbose=False)
+    match_matrix = match_with_gimlightglue_batch_refine(lightglue_matcher, images, index_pairs, feature_dir=feature_dir, device=device, verbose=False)
     timings['feature_matching'].append(time() - t)
     print(f'Features matched in {time() - t:.4f} sec')
     print('match_matrix', match_matrix.sum())
