@@ -919,9 +919,9 @@ def match_with_gimlightglue_ensemble_batch(lightglue_matcher, img_fnames, index_
 
 def visualize_clusters(img1_path, img2_path, mkpts1, mkpts2, labels1, labels2, 
                       cluster_centers1, cluster_centers2, cluster_radii1, cluster_radii2,
-                      save_path=None):
+                      save_path=None, all_kp1=None, all_kp2=None):
     """
-    可视化两张图片的聚类结果，包括聚类中心和聚类区域的圆圈
+    可视化两张图片的聚类结果，包括聚类中心、聚类区域的圆圈和所有特征点
     
     Args:
         img1_path: 第一张图片路径
@@ -935,6 +935,8 @@ def visualize_clusters(img1_path, img2_path, mkpts1, mkpts2, labels1, labels2,
         cluster_radii1: 第一张图片的聚类半径 [r1, r2, ...]
         cluster_radii2: 第二张图片的聚类半径 [r1, r2, ...]
         save_path: 保存路径，如果为None则显示
+        all_kp1: 第一张图片的所有特征点 (Mx2)，可以为None
+        all_kp2: 第二张图片的所有特征点 (Mx2)，可以为None
     """
     # 读取图片
     img1 = cv2.imread(img1_path)
@@ -960,6 +962,40 @@ def visualize_clusters(img1_path, img2_path, mkpts1, mkpts2, labels1, labels2,
     # 创建拼接图
     vis = np.hstack([img1, img2])
     
+    # 偏移量
+    offset = img1.shape[1]
+    
+    # 如果提供了所有特征点，则先绘制它们（作为背景）
+    if all_kp1 is not None:
+        # 确保是numpy数组
+        if isinstance(all_kp1, torch.Tensor):
+            all_kp1 = all_kp1.cpu().numpy()
+        
+        # 缩放所有特征点
+        all_kp1_scaled = all_kp1.copy()
+        all_kp1_scaled[:, 0] *= scale1
+        all_kp1_scaled[:, 1] *= scale1
+        
+        # 绘制所有特征点（淡灰色小点）
+        for pt in all_kp1_scaled:
+            pt = tuple(map(int, pt))
+            cv2.circle(vis, pt, 1, (80, 80, 80), -1)
+    
+    if all_kp2 is not None:
+        # 确保是numpy数组
+        if isinstance(all_kp2, torch.Tensor):
+            all_kp2 = all_kp2.cpu().numpy()
+        
+        # 缩放所有特征点
+        all_kp2_scaled = all_kp2.copy()
+        all_kp2_scaled[:, 0] *= scale2
+        all_kp2_scaled[:, 1] *= scale2
+        
+        # 绘制所有特征点（淡灰色小点）
+        for pt in all_kp2_scaled:
+            pt = tuple(map(int, (pt[0] + offset / scale2 * scale1, pt[1])))
+            cv2.circle(vis, pt, 1, (80, 80, 80), -1)
+    
     # 复制关键点并按比例缩放
     mkpts1_scaled = mkpts1.copy()
     mkpts2_scaled = mkpts2.copy()
@@ -970,13 +1006,10 @@ def visualize_clusters(img1_path, img2_path, mkpts1, mkpts2, labels1, labels2,
     mkpts2_scaled[:, 0] *= scale2
     mkpts2_scaled[:, 1] *= scale2
     
-    # 偏移量
-    offset = img1.shape[1]
-    
     # 所有聚类的颜色映射
     unique_labels1 = np.unique(labels1[labels1 >= 0])
     unique_labels2 = np.unique(labels2[labels2 >= 0])
-    num_clusters = max(len(unique_labels1), len(unique_labels2))
+    num_clusters = max(len(unique_labels1), len(unique_labels2), 1)  # 至少有一种颜色
     
     # 生成随机颜色，但确保对比度足够
     colors = []
@@ -987,6 +1020,32 @@ def visualize_clusters(img1_path, img2_path, mkpts1, mkpts2, labels1, labels2,
         v = 200 + np.random.randint(55)  # 适中亮度
         bgr_color = cv2.cvtColor(np.uint8([[[h, s, v]]]), cv2.COLOR_HSV2RGB)[0][0]
         colors.append((int(bgr_color[0]), int(bgr_color[1]), int(bgr_color[2])))
+    
+    # 绘制聚类区域（半透明填充区域）
+    for i, (center, radius) in enumerate(zip(cluster_centers1, cluster_radii1)):
+        center = (int(center[0] * scale1), int(center[1] * scale1))
+        radius = int(radius * scale1)
+        color_idx = i % len(colors)
+        
+        # 创建一个透明图层
+        overlay = vis.copy()
+        cv2.circle(overlay, center, radius, colors[color_idx], -1)  # 填充圆
+        # 添加透明效果
+        alpha = 0.2  # 透明度
+        cv2.addWeighted(overlay, alpha, vis, 1 - alpha, 0, vis)
+    
+    # 第二张图片的聚类区域
+    for i, (center, radius) in enumerate(zip(cluster_centers2, cluster_radii2)):
+        center = (int(center[0] * scale2) + offset, int(center[1] * scale2))
+        radius = int(radius * scale2)
+        color_idx = i % len(colors)
+        
+        # 创建一个透明图层
+        overlay = vis.copy()
+        cv2.circle(overlay, center, radius, colors[color_idx], -1)  # 填充圆
+        # 添加透明效果
+        alpha = 0.2  # 透明度
+        cv2.addWeighted(overlay, alpha, vis, 1 - alpha, 0, vis)
     
     # 绘制特征点和聚类关系
     for i, (pt1, pt2, l1, l2) in enumerate(zip(mkpts1_scaled, mkpts2_scaled, labels1, labels2)):
@@ -1026,25 +1085,25 @@ def visualize_clusters(img1_path, img2_path, mkpts1, mkpts2, labels1, labels2,
                 
             cv2.line(vis, pt1, pt2, line_color, 1)
     
-    # 绘制聚类中心和圆圈
+    # 绘制聚类中心和圆圈边界
     for i, (center, radius) in enumerate(zip(cluster_centers1, cluster_radii1)):
         center = (int(center[0] * scale1), int(center[1] * scale1))
         radius = int(radius * scale1)
         color_idx = i % len(colors)
         cv2.circle(vis, center, 6, colors[color_idx], -1)  # 聚类中心
-        cv2.circle(vis, center, radius, colors[color_idx], 2)  # 聚类区域
+        cv2.circle(vis, center, radius, colors[color_idx], 2)  # 聚类区域边界
         
         # 添加聚类编号
         cv2.putText(vis, f"{i}", (center[0] + 10, center[1]), 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, colors[color_idx], 2)
     
-    # 第二张图片的聚类中心和圆圈
+    # 第二张图片的聚类中心和圆圈边界
     for i, (center, radius) in enumerate(zip(cluster_centers2, cluster_radii2)):
         center = (int(center[0] * scale2) + offset, int(center[1] * scale2))
         radius = int(radius * scale2)
         color_idx = i % len(colors)
         cv2.circle(vis, center, 6, colors[color_idx], -1)  # 聚类中心
-        cv2.circle(vis, center, radius, colors[color_idx], 2)  # 聚类区域
+        cv2.circle(vis, center, radius, colors[color_idx], 2)  # 聚类区域边界
         
         # 添加聚类编号
         cv2.putText(vis, f"{i}", (center[0] + 10, center[1]), 
@@ -1059,12 +1118,16 @@ def visualize_clusters(img1_path, img2_path, mkpts1, mkpts2, labels1, labels2,
     # 添加灰色噪声点说明
     cv2.putText(vis, "Gray: Noise points", (10, 70), 
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (128, 128, 128), 2)
+    
+    # 添加深灰色背景点说明
+    if all_kp1 is not None or all_kp2 is not None:
+        cv2.putText(vis, "Dark gray: All features", (10, 100), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (80, 80, 80), 2)
 
-    # 保存或显示图像
-    # if save_path:
+    # 保存图像
     cv2.imwrite(save_path, cv2.cvtColor(vis, cv2.COLOR_RGB2BGR))
     
-    # return vis
+    return vis
 
 def second_match(mkpts1, mkpts2, idxs, features_data, key1, key2, lightglue_matcher):
     """二次匹配函数，增加索引映射功能确保结果与原始特征点对应
@@ -1088,8 +1151,8 @@ def second_match(mkpts1, mkpts2, idxs, features_data, key1, key2, lightglue_matc
     img_width = max(features_data[key1]['size'][0][0].item(), features_data[key2]['size'][0][0].item())
     eps = max(18, img_width * 0.03)  # 自适应聚类距离
     
-    db1 = DBSCAN(eps=eps, min_samples=3).fit(mkpts1)
-    db2 = DBSCAN(eps=eps, min_samples=3).fit(mkpts2)
+    db1 = DBSCAN(eps=eps, min_samples=1).fit(mkpts1)
+    db2 = DBSCAN(eps=eps, min_samples=1).fit(mkpts2)
     
     labels1 = db1.labels_
     labels2 = db2.labels_
@@ -1126,6 +1189,7 @@ def second_match(mkpts1, mkpts2, idxs, features_data, key1, key2, lightglue_matc
         # 计算聚类半径 (最大距离 * 扩展系数)
         distances = np.sqrt(np.sum((cluster_points - centers)**2, axis=1))
         radius = np.max(distances) * region_expansion
+        radius = max(radius, 50)  # 确保半径至少为1
         
         # 计算所有点到聚类中心的距离，并标记在扩展区域内的点
         all_distances = np.sqrt(np.sum((all_kp1_np - centers)**2, axis=1))
@@ -1140,35 +1204,38 @@ def second_match(mkpts1, mkpts2, idxs, features_data, key1, key2, lightglue_matc
         centers = np.mean(cluster_points, axis=0)
         distances = np.sqrt(np.sum((cluster_points - centers)**2, axis=1))
         radius = np.max(distances) * region_expansion
-        
+        radius = max(radius, 50)  # 确保半径至少为1
+
         all_distances = np.sqrt(np.sum((all_kp2_np - centers)**2, axis=1))
         in_region_mask2 |= (all_distances < radius)
         cluster_centers2.append(centers)
         cluster_radius2.append(radius)
     
-        # 可视化聚类结果
-    if (len(valid_clusters1) > 0 or len(valid_clusters2) > 0):
-        # 提取图像路径
-        images_dir = os.path.dirname(os.path.dirname(features_data[key1]['size'].device.type))
-        images_dir = '/mnt/e/yey/work/IMC2025/image-matching-challenge-2025/train/stairs_one'
-        img1_path = os.path.join(images_dir, key1)
-        img2_path = os.path.join(images_dir, key2)
+    #     # 可视化聚类结果
+    # if (len(valid_clusters1) > 0 or len(valid_clusters2) > 0):
+    #     # 提取图像路径
+    #     images_dir = os.path.dirname(os.path.dirname(features_data[key1]['size'].device.type))
+    #     images_dir = '/mnt/e/yey/work/IMC2025/image-matching-challenge-2025/train/stairs_one'
+    #     img1_path = os.path.join(images_dir, key1)
+    #     img2_path = os.path.join(images_dir, key2)
         
-        # 确保可视化输出目录存在
-        # vis_dir = os.path.join(os.path.dirname(images_dir), 'visualizations', 'clusters')
-        vis_dir = '/mnt/e/yey/work/IMC2025/IMC2025/results/featureout/ETs_one/visualizations'
-        os.makedirs(vis_dir, exist_ok=True)
-        save_path = os.path.join(vis_dir, f'{key1}_{key2}_clusters.png')
-        
-        # 可视化聚类
-        visualize_clusters(
-            img1_path, img2_path, 
-            mkpts1, mkpts2, 
-            labels1, labels2, 
-            cluster_centers1, cluster_centers2, 
-            cluster_radius1, cluster_radius2,
-            save_path
-        )
+    #     # 确保可视化输出目录存在
+    #     # vis_dir = os.path.join(os.path.dirname(images_dir), 'visualizations', 'clusters')
+    #     vis_dir = '/mnt/e/yey/work/IMC2025/IMC2025/results/featureout/ETs_one/visualizations'
+    #     os.makedirs(vis_dir, exist_ok=True)
+    #     save_path = os.path.join(vis_dir, f'{key1}_{key2}_clusters.png')
+    #     if "stairs_split_1_1710453626698.png_stairs_split_1_1710453620694.png_clusters" in save_path:
+    #         print("hh")
+    #     # 可视化聚类
+    #     visualize_clusters(
+    #         img1_path, img2_path, 
+    #         mkpts1, mkpts2, 
+    #         labels1, labels2, 
+    #         cluster_centers1, cluster_centers2, 
+    #         cluster_radius1, cluster_radius2,
+    #         save_path,
+    #         all_kp1, all_kp2
+    #     )
 
     # 如果没有有效聚类，使用初始匹配结果
     if len(valid_clusters1) == 0 or len(valid_clusters2) == 0:
@@ -1411,13 +1478,13 @@ def match_with_gimlightglue_batch(lightglue_matcher, img_fnames, index_pairs, fe
                 if verbose:
                     print(f'{key1}-{key2}: {n_matches} matches')
                 
+                # # # 进行第二阶段匹配
+                # mkpts1 = features_data[key1]['kp'][idxs[:,0]]
+                # mkpts2 = features_data[key2]['kp'][idxs[:,1]]
                 # # 进行第二阶段匹配
-                mkpts1 = features_data[key1]['kp'][idxs[:,0]]
-                mkpts2 = features_data[key2]['kp'][idxs[:,1]]
-                # 进行第二阶段匹配
-                region_idxs = second_match(mkpts1.cpu().numpy(), mkpts2.cpu().numpy(), idxs, features_data, key1, key2, lightglue_matcher)
-                print("region_dists:", len(idxs), len(region_idxs))
-                idxs = region_idxs
+                # region_idxs = second_match(mkpts1.cpu().numpy(), mkpts2.cpu().numpy(), idxs, features_data, key1, key2, lightglue_matcher)
+                # print("region_dists:", len(idxs), len(region_idxs))
+                # idxs = region_idxs
                 n_matches = len(idxs)
                 # 保存匹配结果
                 if n_matches >= min_matches:
@@ -1435,18 +1502,18 @@ def match_with_gimlightglue_batch(lightglue_matcher, img_fnames, index_pairs, fe
                         group.create_dataset(key2, data=idxs.detach().cpu().numpy().reshape(-1, 2))
                         match_matrix[idx1, idx2] = n_matches
                         
-                        # 可视化匹配
-                        if visualize:
-                            vis_dir = os.path.join(feature_dir, 'visualizations')
-                            os.makedirs(vis_dir, exist_ok=True)
-                            save_path = os.path.join(vis_dir, f'{key1}_{key2}_matches.png')
-                            visualize_matches(
-                                fname1, fname2,
-                                features_data[key1]['kp'].cpu().numpy(),
-                                features_data[key2]['kp'].cpu().numpy(),
-                                idxs.cpu().numpy(),
-                                save_path
-                            )
+                        # # 可视化匹配
+                        # if visualize:
+                        #     vis_dir = os.path.join(feature_dir, 'visualizations')
+                        #     os.makedirs(vis_dir, exist_ok=True)
+                        #     save_path = os.path.join(vis_dir, f'{key1}_{key2}_matches.png')
+                        #     visualize_matches(
+                        #         fname1, fname2,
+                        #         features_data[key1]['kp'].cpu().numpy(),
+                        #         features_data[key2]['kp'].cpu().numpy(),
+                        #         idxs.cpu().numpy(),
+                        #         save_path
+                        #     )
 
         for pair_idx in tqdm(single_pairs_lst):
             idx1, idx2 = pair_idx
@@ -2119,7 +2186,7 @@ class Prediction:
 
 # Main processing
 is_train = True
-is_OneTest = True
+is_OneTest = False
 data_dir = '../image-matching-challenge-2025'
 workdir = './results'
 os.makedirs(workdir, exist_ok=True)
