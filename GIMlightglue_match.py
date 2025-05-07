@@ -391,7 +391,7 @@ class Lightglue_Matcher():
             'max_num_keypoints': num_features,
             'force_num_keypoints': True,
             'detection_threshold': 0.0,
-            'nms_radius': 3,
+            'nms_radius': 2,
             "refinement_radius": 0,
             'trainable': False,
         })
@@ -485,7 +485,7 @@ class Lightglue_Matcher():
 
         return mconf, kpts0, kpts1
 
-    def extract(self, img_path0, nms_radius=5):
+    def extract(self, img_path0, nms_radius=3):
         device = self.device
         gray0 = read_image(img_path0, grayscale=True)
         gray0, scale0 = preprocess(gray0, grayscale=True)
