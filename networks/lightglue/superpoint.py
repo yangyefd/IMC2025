@@ -367,6 +367,7 @@ class SuperPoint(BaseModel):
                 "keypoints": keypoints + 0.5,
                 "keypoints_refine": keypoints_refine + 0.5,
                 "descriptors": desc.transpose(-1, -2),
+                "scores": scores,
             }
 
             if self.conf.dense_outputs:

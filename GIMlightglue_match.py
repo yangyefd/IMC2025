@@ -389,9 +389,9 @@ class Lightglue_Matcher():
 
         detector = SuperPoint({
             'max_num_keypoints': num_features,
-            'force_num_keypoints': False,
+            'force_num_keypoints': True,
             'detection_threshold': 0.0,
-            'nms_radius': 5,
+            'nms_radius': 3,
             "refinement_radius": 0,
             'trainable': False,
         })
@@ -485,7 +485,7 @@ class Lightglue_Matcher():
 
         return mconf, kpts0, kpts1
 
-    def extract(self, img_path0):
+    def extract(self, img_path0, nms_radius=5):
         device = self.device
         gray0 = read_image(img_path0, grayscale=True)
         gray0, scale0 = preprocess(gray0, grayscale=True)
@@ -506,6 +506,68 @@ class Lightglue_Matcher():
             pred.update({k + '0': v for k, v in self.detector({
                 "image": data["gray0"],
             }).items()})
+
+        # 获取特征点和分数
+        keypoints = pred['keypoints0']
+        descriptors = pred['descriptors0']
+        keypoints_refine = pred['keypoints_refine0']
+        scores = pred['scores0']
+
+        # 按分数降序排序
+        indices = torch.argsort(scores[0], descending=True)
+        
+        # 应用空间NMS，但保留所有点
+        keypoints_np = keypoints[0, indices].cpu().numpy()
+        scores_np = scores[0, indices].cpu().numpy()
+        keep_indices = []  # NMS保留的点
+        suppressed_indices = []  # NMS抑制的点
+        
+        # 创建一个掩码标记已选择的区域
+        h, w = data['gray0'].shape[2:]
+        mask = np.zeros((h, w), dtype=bool)
+        
+        # 第一轮：选择要保留的点
+        for i in range(len(keypoints_np)):
+            x, y = int(keypoints_np[i, 0]), int(keypoints_np[i, 1])
+            # 检查点是否在图像中
+            if 0 <= x < w and 0 <= y < h:
+                # 检查该区域是否已被选择
+                roi = mask[max(0, y-nms_radius):min(h, y+nms_radius+1), 
+                        max(0, x-nms_radius):min(w, x+nms_radius+1)]
+                if not np.any(roi):
+                    # 更新掩码
+                    mask[max(0, y-nms_radius):min(h, y+nms_radius+1), 
+                        max(0, x-nms_radius):min(w, x+nms_radius+1)] = True
+                    keep_indices.append(i)
+                else:
+                    # 记录被抑制的点
+                    suppressed_indices.append(i)
+            else:
+                # 超出图像的点也归为被抑制
+                suppressed_indices.append(i)
+        
+        # 转换为PyTorch索引
+        keep_indices = torch.tensor(keep_indices, device=device)
+        suppressed_indices = torch.tensor(suppressed_indices, device=device)
+        
+        # 创建新的索引顺序：先是通过NMS的点，然后是被抑制的点
+        new_indices = torch.cat([
+            indices[keep_indices],  # 通过NMS的高分点
+            indices[suppressed_indices]  # 被抑制的低分点
+        ])
+        
+        # 重新排序特征点和描述符
+        keypoints = keypoints[:,new_indices]
+        descriptors = descriptors[:,new_indices]
+        keypoints_refine = keypoints_refine[:,new_indices]
+        scores = scores[:, new_indices]
+        
+        # 更新排序后的结果
+        pred['keypoints0'] = keypoints
+        pred['descriptors0'] = descriptors
+        pred['keypoints_refine0'] = keypoints_refine
+        pred['scores0'] = scores
+
         pred['keypoints0'] = torch.cat([kp * s for kp, s in zip(pred['keypoints0'], data['scale0'][:, None])])
         pred['keypoints_refine0'] = torch.cat([kp * s for kp, s in zip(pred['keypoints_refine0'], data['scale0'][:, None])])
         
