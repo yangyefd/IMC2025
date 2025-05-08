@@ -1693,7 +1693,7 @@ def second_match_ensemble(mkpts1, mkpts2, idxs, features_data, key1, key2, lg_ma
 
 def match_with_gimlightglue_batch(lightglue_matcher, img_fnames, index_pairs, feature_dir='.featureout', 
                                            device=torch.device('cpu'), min_matches=15, batch_size=2, 
-                                           tok_limit=3000, match_limit=4096, verbose=True, visualize=True):
+                                           tok_limit=3000, match_limit=5012, verbose=True, visualize=True):
     """
     使用批处理方式进行特征匹配，点数不会超过 max_points，但可能小于。
     对于点数相同的匹配对进行批处理，点数不同的匹配对单独处理。
@@ -1817,7 +1817,8 @@ def match_with_gimlightglue_batch(lightglue_matcher, img_fnames, index_pairs, fe
                     sorted_indices = torch.argsort(dists, descending=True)
                     sorted_dists = dists[sorted_indices]
                     sorted_idxs_batch = idxs[sorted_indices]
-                    top_k = min(tok_limit, len(sorted_dists))
+                    # top_k = min(tok_limit, len(sorted_dists))
+                    top_k = len(sorted_dists)
                     sorted_idxs.append(sorted_idxs_batch[:top_k])
                 else:
                     sorted_idxs.append([])
@@ -2982,7 +2983,7 @@ for dataset, predictions in samples.items():
     # timings['feature_matching'].append(time() - t)
     # print(f'Features matched in {time() - t:.4f} sec')
 
-    lightglue_matcher = Lightglue_Matcher(device=device,num_features=4096)
+    lightglue_matcher = Lightglue_Matcher(device=device,num_features=5012)
     
     # t = time()
     # # detect_aliked(images, feature_dir, 4096, device=device)
@@ -2991,7 +2992,7 @@ for dataset, predictions in samples.items():
 
     t = time()
     # detect_aliked(images, feature_dir, 4096, device=device)
-    detect_sp_batch(lightglue_matcher, images, feature_dir, 8192, device=device)
+    detect_sp_batch(lightglue_matcher, images, feature_dir, 5012, device=device)
     timings['feature_detection'].append(time() - t)
     print(f'Features detected in {time() - t:.4f} sec')
 

@@ -139,7 +139,7 @@ def read_matches_from_db(db_path):
             matches_data.append((pair_id, match_array))
     return matches_data
 
-def prosac_lo_ransac_fundamental(points1, points2, confidence_scores, threshold=1.0, max_iter=1000):
+def prosac_lo_ransac_fundamental(points1, points2, confidence_scores, threshold=1.0, max_iter=200):
  
     # Step 1: 按置信分数进行排序
     sorted_indices = np.argsort(-confidence_scores)  # 从高到低排序
@@ -171,11 +171,11 @@ def prosac_lo_ransac_fundamental(points1, points2, confidence_scores, threshold=
                 best_fundamental_matrix = fundamental_matrix
                 best_inliers_mask = inliers_mask
 
-    # Step 6: LO-RANSAC 局部优化：使用内点重新拟合模型
-    if best_inliers_mask is not None:
-        refined_points1 = points1_sorted[best_inliers_mask]
-        refined_points2 = points2_sorted[best_inliers_mask]
-        best_fundamental_matrix, _ = cv2.findFundamentalMat(refined_points1, refined_points2, cv2.FM_RANSAC)
+    # # Step 6: LO-RANSAC 局部优化：使用内点重新拟合模型
+    # if best_inliers_mask is not None:
+    #     refined_points1 = points1_sorted[best_inliers_mask]
+    #     refined_points2 = points2_sorted[best_inliers_mask]
+    #     best_fundamental_matrix, _ = cv2.findFundamentalMat(refined_points1, refined_points2, cv2.FM_RANSAC)
 
     return best_fundamental_matrix, best_inliers_mask
 
