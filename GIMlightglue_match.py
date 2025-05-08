@@ -391,7 +391,7 @@ class Lightglue_Matcher():
             'max_num_keypoints': num_features,
             'force_num_keypoints': True,
             'detection_threshold': 0.0,
-            'nms_radius': 2,
+            'nms_radius': 3,
             "refinement_radius": 0,
             'trainable': False,
         })

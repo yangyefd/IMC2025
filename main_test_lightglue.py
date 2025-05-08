@@ -327,8 +327,8 @@ def detect_sp_batch(lightglue_matcher, img_fnames, feature_dir='.featureout', nu
          h5py.File(f'{feature_dir}/descriptors.h5', mode='w') as f_desc, \
          h5py.File(f'{feature_dir}/size.h5', mode='w') as f_size,\
          h5py.File(f'{feature_dir}/scale.h5', mode='w') as f_scale,\
-         h5py.File(f'{feature_dir}/mask.h5', mode='w') as f_mask,\
-         h5py.File(f'{feature_dir}/p_mask.h5', mode='r') as f_pmask:
+         h5py.File(f'{feature_dir}/mask.h5', mode='w') as f_mask:
+        #  h5py.File(f'{feature_dir}/p_mask.h5', mode='r') as f_pmask:
         for img_path in tqdm(img_fnames):
             img_fname = img_path.split('/')[-1]
             img_fname = img_fname.split('\\')[-1]
@@ -343,11 +343,11 @@ def detect_sp_batch(lightglue_matcher, img_fnames, feature_dir='.featureout', nu
                 kpts_refine[:len(feats0_kpts)] = feats0['keypoints_refine0'].reshape(-1, 2).detach().cpu().numpy()
                 descs[:len(feats0_kpts)] = feats0['descriptors0'].reshape(len(feats0_kpts), -1).detach().cpu().numpy()
 
-                p_mask = f_pmask[key][...]
-                if len(p_mask) == 0:
-                    pts_mask = np.ones(len(kpts), dtype=np.bool_)
-                else:
-                    pts_mask = ~p_mask[kpts[:, 1].astype(np.int32), kpts[:, 0].astype(np.int32)]
+                # p_mask = f_pmask[key][...]
+                # if len(p_mask) == 0:
+                pts_mask = np.ones(len(kpts), dtype=np.bool_)
+                # else:
+                #     pts_mask = ~p_mask[kpts[:, 1].astype(np.int32), kpts[:, 0].astype(np.int32)]
                 f_kp_coarse[key] = kpts[pts_mask]
                 f_kp[key] = kpts[pts_mask]
                 f_desc[key] = descs[pts_mask]
@@ -428,9 +428,9 @@ def detect_sp_ensemble(lightglue_matcher, img_fnames, feature_dir='.featureout',
             img_fname = img_fname.split('\\')[-1]
             key = img_fname
             with torch.inference_mode():
-                kpts = np.zeros((num_features,2))
-                kpts_refine = np.zeros((num_features,2))
-                descs = np.zeros((num_features,256))
+                kpts = np.zeros((num_features,2)).astype(np.float32)
+                kpts_refine = np.zeros((num_features,2)).astype(np.float32)
+                descs = np.zeros((num_features,256)).astype(np.float32)
                 feats0, data = lightglue_matcher.extract(img_path)
                 feats0_kpts = feats0['keypoints0'].reshape(-1, 2).detach().cpu().numpy()
                 kpts[:len(feats0_kpts)] = feats0['keypoints0'].reshape(-1, 2).detach().cpu().numpy()
@@ -1321,6 +1321,108 @@ def second_match(mkpts1, mkpts2, idxs, features_data, key1, key2, lightglue_matc
     # 如果找不到合适的区域匹配或区域匹配后没有结果，返回原始匹配
     return idxs
 
+def filter_clusters_by_match_count(idxs, features_data, key1, key2, cluster_centers1, cluster_centers2, 
+                                    cluster_radius1, cluster_radius2, min_matches_per_cluster=5):
+    """
+    根据聚类中心和半径，计算每个匹配对所属簇，并过滤掉匹配对数量不足阈值的簇
+    """
+    if isinstance(idxs, torch.Tensor):
+        idxs_np = idxs.cpu().numpy()
+    else:
+        idxs_np = idxs
+    
+    # 没有聚类时直接返回原始匹配
+    if len(cluster_centers1) == 0 or len(cluster_centers2) == 0:
+        return idxs
+    
+    # 获取匹配对坐标
+    kp1 = features_data[key1]['kp']
+    kp2 = features_data[key2]['kp']
+    
+    if isinstance(kp1, torch.Tensor):
+        kp1 = kp1.cpu().numpy()
+    if isinstance(kp2, torch.Tensor):
+        kp2 = kp2.cpu().numpy()
+    
+    # 获取匹配对的坐标
+    match_coords1 = kp1[idxs_np[:, 0]]
+    match_coords2 = kp2[idxs_np[:, 1]]
+    
+    # 初始化每个匹配对所属的簇
+    match_cluster_ids = -np.ones(len(idxs_np), dtype=int)
+    
+    # 每个簇的匹配对计数
+    cluster_match_counts = {}
+    
+    # 为每个匹配对分配簇
+    for i, (coord1, coord2) in enumerate(zip(match_coords1, match_coords2)):
+        # 检查第一张图像中点所属的簇
+        cluster1_id = -1
+        for c_id, (center, radius) in enumerate(zip(cluster_centers1, cluster_radius1)):
+            dist = np.sqrt(np.sum((coord1 - center) ** 2))
+            if dist <= radius:
+                cluster1_id = c_id
+                break
+        
+        # 检查第二张图像中点所属的簇
+        cluster2_id = -1
+        for c_id, (center, radius) in enumerate(zip(cluster_centers2, cluster_radius2)):
+            dist = np.sqrt(np.sum((coord2 - center) ** 2))
+            if dist <= radius:
+                cluster2_id = c_id
+                break
+        
+        # 只有当两个点都属于某个簇时，才认为这个匹配对属于一个有效簇
+        if cluster1_id >= 0 and cluster2_id >= 0:
+            cluster_pair = (cluster1_id, cluster2_id)
+            match_cluster_ids[i] = hash(cluster_pair) % 10000000  # 使用哈希值作为簇对的唯一标识
+            
+            if cluster_pair not in cluster_match_counts:
+                cluster_match_counts[cluster_pair] = 0
+            cluster_match_counts[cluster_pair] += 1
+    
+    # 找出满足最小匹配对数量的簇
+    valid_cluster_pairs = {pair for pair, count in cluster_match_counts.items() 
+                           if count >= min_matches_per_cluster}
+    
+    # 生成过滤掩码，只保留属于有效簇的匹配对
+    valid_mask = np.zeros(len(idxs_np), dtype=bool)
+    
+    for i, (coord1, coord2) in enumerate(zip(match_coords1, match_coords2)):
+        # 再次检查第一张图像中点所属的簇
+        cluster1_id = -1
+        for c_id, (center, radius) in enumerate(zip(cluster_centers1, cluster_radius1)):
+            dist = np.sqrt(np.sum((coord1 - center) ** 2))
+            if dist <= radius:
+                cluster1_id = c_id
+                break
+        
+        # 再次检查第二张图像中点所属的簇
+        cluster2_id = -1
+        for c_id, (center, radius) in enumerate(zip(cluster_centers2, cluster_radius2)):
+            dist = np.sqrt(np.sum((coord2 - center) ** 2))
+            if dist <= radius:
+                cluster2_id = c_id
+                break
+        
+        # 如果匹配对属于有效簇，则保留
+        if cluster1_id >= 0 and cluster2_id >= 0:
+            cluster_pair = (cluster1_id, cluster2_id)
+            if cluster_pair in valid_cluster_pairs:
+                valid_mask[i] = True
+        else:
+            # 不属于任何簇的匹配对也保留（可选，视需求而定）
+            valid_mask[i] = True
+    
+    # 应用过滤
+    idxs_filter_np = idxs_np[valid_mask]
+    
+    # 转回原始类型
+    if isinstance(idxs, torch.Tensor):
+        return torch.tensor(idxs_filter_np, device=idxs.device, dtype=idxs.dtype)
+    else:
+        return idxs_filter_np
+
 def second_match_ensemble(mkpts1, mkpts2, idxs, features_data, key1, key2, lg_matcher):
     """二次匹配函数，增加索引映射功能确保结果与原始特征点对应
     
@@ -1336,7 +1438,6 @@ def second_match_ensemble(mkpts1, mkpts2, idxs, features_data, key1, key2, lg_ma
         mapped_idxs: 映射回原始索引的匹配结果
     """
     
-    min_radius = 100.0  # 最小半径
     # 将原始匹配对转换为集合形式，便于快速查找
     orig_idxs = idxs.clone().cpu().numpy()
     orig_matches_set = {(int(idx[0])) for idx in orig_idxs}
@@ -1344,6 +1445,7 @@ def second_match_ensemble(mkpts1, mkpts2, idxs, features_data, key1, key2, lg_ma
     # 根据图像大小调整eps参数
     img_width = max(features_data[key1]['size'][0][0].item(), features_data[key2]['size'][0][0].item())
     eps = max(18, img_width * 0.03)  # 自适应聚类距离
+    min_radius = img_width * 0.15  # 最小半径
     
     db1 = DBSCAN(eps=eps, min_samples=3).fit(mkpts1)
     db2 = DBSCAN(eps=eps, min_samples=3).fit(mkpts2)
@@ -1407,12 +1509,12 @@ def second_match_ensemble(mkpts1, mkpts2, idxs, features_data, key1, key2, lg_ma
     valid_clusters2 = np.unique(labels2[labels2 >= 0])
     
     # 加载所有特征点
-    all_kp1 = features_data[key1]['kp'][4096:]
-    all_kp2 = features_data[key2]['kp'][4096:]
-    all_desc1 = features_data[key1]['desc'][4096:,:128]
-    all_desc2 = features_data[key2]['desc'][4096:,:128]
-    fp_maks1 = features_data[key1]['mask']
-    fp_maks2 = features_data[key2]['mask']
+    all_kp1 = features_data[key1]['kp'][4096:].clone()
+    all_kp2 = features_data[key2]['kp'][4096:].clone()
+    all_desc1 = features_data[key1]['desc'][4096:,:128].clone()
+    all_desc2 = features_data[key2]['desc'][4096:,:128].clone()
+    fp_maks1 = features_data[key1]['mask'].clone()
+    fp_maks2 = features_data[key2]['mask'].clone()
     
     # 为每个聚类创建掩码，判断哪些点在聚类区域内
     all_kp1_np = all_kp1.cpu().numpy()
@@ -1458,31 +1560,31 @@ def second_match_ensemble(mkpts1, mkpts2, idxs, features_data, key1, key2, lg_ma
         cluster_centers2.append(centers)
         cluster_radius2.append(radius)
     
-        # 可视化聚类结果
-    if (len(valid_clusters1) > 0 or len(valid_clusters2) > 0):
-        # 提取图像路径
-        images_dir = os.path.dirname(os.path.dirname(features_data[key1]['size'].device.type))
-        images_dir = 'E:\\work\\image-matching-challenge-2025\\train\\ETs'
-        img1_path = os.path.join(images_dir, key1)
-        img2_path = os.path.join(images_dir, key2)
+    #     # 可视化聚类结果
+    # if (len(valid_clusters1) > 0 or len(valid_clusters2) > 0):
+    #     # 提取图像路径
+    #     images_dir = os.path.dirname(os.path.dirname(features_data[key1]['size'].device.type))
+    #     images_dir = '/mnt/e/yey/work/IMC2025/image-matching-challenge-2025/train/ETs'
+    #     img1_path = os.path.join(images_dir, key1)
+    #     img2_path = os.path.join(images_dir, key2)
         
-        # 确保可视化输出目录存在
-        # vis_dir = os.path.join(os.path.dirname(images_dir), 'visualizations', 'clusters')
-        vis_dir = './results/featureout/cluster'
-        os.makedirs(vis_dir, exist_ok=True)
-        save_path = os.path.join(vis_dir, f'{key1}_{key2}_clusters.png')
-        if "stairs_split_1_1710453626698.png_stairs_split_1_1710453620694.png_clusters" in save_path:
-            print("hh")
-        # 可视化聚类
-        visualize_clusters(
-            img1_path, img2_path, 
-            mkpts1, mkpts2, 
-            labels1, labels2, 
-            cluster_centers1, cluster_centers2, 
-            cluster_radius1, cluster_radius2,
-            save_path,
-            all_kp1, all_kp2
-        )
+    #     # 确保可视化输出目录存在
+    #     # vis_dir = os.path.join(os.path.dirname(images_dir), 'visualizations', 'clusters')
+    #     vis_dir = './results/featureout/cluster'
+    #     os.makedirs(vis_dir, exist_ok=True)
+    #     save_path = os.path.join(vis_dir, f'{key1}_{key2}_clusters.png')
+    #     if "stairs_split_1_1710453626698.png_stairs_split_1_1710453620694.png_clusters" in save_path:
+    #         print("hh")
+    #     # 可视化聚类
+    #     visualize_clusters(
+    #         img1_path, img2_path, 
+    #         mkpts1, mkpts2, 
+    #         labels1, labels2, 
+    #         cluster_centers1, cluster_centers2, 
+    #         cluster_radius1, cluster_radius2,
+    #         save_path,
+    #         all_kp1, all_kp2
+    #     )
 
     # 如果没有有效聚类，使用初始匹配结果
     if len(valid_clusters1) == 0 or len(valid_clusters2) == 0:
@@ -1529,10 +1631,10 @@ def second_match_ensemble(mkpts1, mkpts2, idxs, features_data, key1, key2, lg_ma
         # print("区域内特征点数量：", len(region_kp1), len(region_kp2))
         # 执行第二阶段匹配
         region_pred = {
-            'keypoints0': region_kp1[:2048][None],
-            'keypoints1': region_kp2[:2048][None],
-            'descriptors0': region_desc1[:2048,:128][None],
-            'descriptors1': region_desc2[:2048,:128][None],
+            'keypoints0': region_kp1[:3072][None],
+            'keypoints1': region_kp2[:3072][None],
+            'descriptors0': region_desc1[:3072,:128],
+            'descriptors1': region_desc2[:3072,:128],
             'size0': features_data[key1]['size'],
             'size1': features_data[key2]['size'],
             'scale0': features_data[key1]['scale'],
@@ -1540,10 +1642,12 @@ def second_match_ensemble(mkpts1, mkpts2, idxs, features_data, key1, key2, lg_ma
         }
 
         with torch.inference_mode():
-            _, region_idxs = lg_matcher(region_pred['descriptors0'][:fp_maks1[1]].float(), region_pred['descriptors1'][:fp_maks2[1]].float(),
-                KF.laf_from_center_scale_ori(region_pred['keypoints0'][:fp_maks1[1]].float()),
-                KF.laf_from_center_scale_ori(region_pred['keypoints1'][:fp_maks2[1]].float()))
-            
+            region_dist, region_idxs = lg_matcher(region_pred['descriptors0'][:fp_maks1[1]].float(), region_pred['descriptors1'][:fp_maks2[1]].float(),
+                KF.laf_from_center_scale_ori(region_pred['keypoints0'][:,:fp_maks1[1]].float()),
+                KF.laf_from_center_scale_ori(region_pred['keypoints1'][:,:fp_maks2[1]].float()))
+            region_valid_mask = (region_dist > 0.25)
+            region_dist = region_dist[region_valid_mask[:,0]]
+            region_idxs = region_idxs[region_valid_mask[:,0]]
         # 关键：将区域内的匹配索引映射回原始索引
         if len(region_idxs) > 0:
             # 限制区域匹配的索引范围
@@ -1581,9 +1685,10 @@ def second_match_ensemble(mkpts1, mkpts2, idxs, features_data, key1, key2, lg_ma
                 all_matches = np.array(preserved_matches + refined_matches + new_matches)
                 merged_idxs = torch.tensor(all_matches, device=idxs.device, dtype=idxs.dtype)
                 
+                merged_idxs = filter_clusters_by_match_count(merged_idxs, features_data, key1, key2, cluster_centers1, cluster_centers2, cluster_radius1, cluster_radius2)
                 return merged_idxs
     # 如果找不到合适的区域匹配或区域匹配后没有结果，返回原始匹配
-    return idxs
+    return torch.zeros((0,2))
 
 def match_with_gimlightglue_batch(lightglue_matcher, img_fnames, index_pairs, feature_dir='.featureout', 
                                            device=torch.device('cpu'), min_matches=15, batch_size=2, 
@@ -1839,7 +1944,7 @@ def match_with_gimlightglue_batch(lightglue_matcher, img_fnames, index_pairs, fe
 
 def match_with_gimlightglue_ensemble(lightglue_matcher, img_fnames, index_pairs, feature_dir='.featureout', 
                                            device=torch.device('cpu'), min_matches=15, batch_size=2, 
-                                           tok_limit=3000, match_limit=4096, verbose=True, visualize=True):
+                                           tok_limit=1200, match_limit=4096, verbose=True, visualize=True):
     """
     使用批处理方式进行特征匹配，点数不会超过 max_points，但可能小于。
     对于点数相同的匹配对进行批处理，点数不同的匹配对单独处理。
@@ -1982,12 +2087,13 @@ def match_with_gimlightglue_ensemble(lightglue_matcher, img_fnames, index_pairs,
                 if verbose:
                     print(f'{key1}-{key2}: {n_matches} matches')
                 
-                if len(idxs) < 500:
+                if len(idxs) < 700:
                     # # 进行第二阶段匹配
                     mkpts1 = features_data[key1]['kp'][idxs[:,0]]
                     mkpts2 = features_data[key2]['kp'][idxs[:,1]]
                     # 进行第二阶段匹配
                     region_idxs = second_match_ensemble(mkpts1.cpu().numpy(), mkpts2.cpu().numpy(), idxs, features_data, key1, key2, lg_matcher)
+                    print(f'{key1}-{key2}')
                     print("region_dists:", len(idxs), len(region_idxs))
                     idxs = region_idxs
                 n_matches = len(idxs)
@@ -2740,8 +2846,8 @@ if is_OneTest:
     ]
 else:
     dataset_train_test_lst = [
-        'ETs',
-        # 'stairs'
+        # 'ETs',
+        'stairs'
         # 'imc2023_heritage'
     ]
     
@@ -2831,6 +2937,7 @@ for dataset, predictions in samples.items():
     print(f'Features matched in {time() - t:.4f} sec')
     print('match_matrix', match_matrix.sum())
 
+    exit()
     #删除无用文件
     if os.path.exists(f'{feature_dir}/feat_f.h5'):
         os.remove(f'{feature_dir}/feat_f.h5')
