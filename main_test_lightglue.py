@@ -1595,7 +1595,7 @@ def second_match_ensemble(mkpts1, mkpts2, idxs, features_data, key1, key2, lg_ma
 
     # 如果没有有效聚类，使用初始匹配结果
     if len(valid_clusters1) == 0 or len(valid_clusters2) == 0:
-        return idxs
+        return torch.zeros((0,2))
     else:
         # 使用区域内的特征点进行第二阶段匹配
         region_kp1 = all_kp1[in_region_mask1]
