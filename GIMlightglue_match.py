@@ -159,13 +159,14 @@ def preprocess(image: np.ndarray, grayscale: bool = False, resize_max: int = Non
             image = resize_image(image, size_new, 'cv2_area')
             scale = np.array(size) / np.array(size_new)
 
-    # resize_min = 800
-    # if resize_min:
-    #     scale = resize_min / max(size)
-    #     if scale > 1.0:
-    #         size_new = tuple(int(round(x*scale)) for x in size)
-    #         image = resize_image(image, size_new, 'cv2_area')
-    #         scale = np.array(size) / np.array(size_new)
+    resize_min = 1024
+    if resize_min:
+        scale = resize_min / max(size)
+        scale = min(scale, 1.25)
+        if scale > 1.0:
+            size_new = tuple(int(round(x*scale)) for x in size)
+            image = resize_image(image, size_new, 'cv2_area')
+            scale = np.array(size) / np.array(size_new)
             
     if grayscale:
         assert image.ndim == 2, image.shape
