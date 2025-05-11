@@ -15,6 +15,8 @@ from data_process.person_mask import person_mask
 from networks.loftr.loftr import LoFTR
 from networks.loftr.misc import lower_config
 from networks.loftr.config import get_cfg_defaults
+import kornia
+import copy
 
 
 DEFAULT_MIN_NUM_MATCHES = 4
@@ -47,6 +49,40 @@ def read_image(path, grayscale=False):
         image = image[:, :, ::-1]  # BGR to RGB
     return image
 
+def read_image_rot(path, grayscale=False):
+    """
+    读取图像并生成 4 个旋转角度的版本：0°、90°、180°、270°。
+
+    Args:
+        path (str): 图像路径。
+        grayscale (bool): 是否读取为灰度图像。
+
+    Returns:
+        list: 包含 4 个旋转角度图像的列表。
+    """
+    if grayscale:
+        mode = cv2.IMREAD_GRAYSCALE
+    else:
+        mode = cv2.IMREAD_COLOR
+
+    # 读取图像
+    image = cv2.imread(str(path), mode)
+    if image is None:
+        raise ValueError(f'Cannot read image {path}.')
+    if not grayscale and len(image.shape) == 3:
+        image = image[:, :, ::-1]  # BGR to RGB
+
+    # 生成 4 个旋转角度的图像
+    images_rot = [
+        image,  # 0°
+        cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE),  # 90°
+        cv2.rotate(image, cv2.ROTATE_180),  # 180°
+        cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)  # 270°
+    ]
+
+    return images_rot
+
+
 
 def resize_image(image, size, interp):
     assert interp.startswith('cv2_')
@@ -65,7 +101,6 @@ def resize_image(image, size, interp):
         raise ValueError(
             f'Unknown interpolation {interp}.')
     return resized
-
 
 def fast_make_matching_figure(data, b_id):
     color0 = (data['color0'][b_id].permute(1, 2, 0).cpu().detach().numpy() * 255).round().astype(np.uint8)  # (rH, rW, 3)
@@ -104,7 +139,6 @@ def fast_make_matching_figure(data, b_id):
         cv2.circle(out, (x1 + margin + w0, y1 + sh), 3, c, -1, lineType=cv2.LINE_AA)
 
     return out
-
 
 def fast_make_matching_overlay(data, b_id):
     color0 = (data['color0'][b_id].permute(1, 2, 0).cpu().detach().numpy() * 255).round().astype(np.uint8)  # (rH, rW, 3)
@@ -145,7 +179,6 @@ def fast_make_matching_overlay(data, b_id):
 
     return out
 
-
 def preprocess(image: np.ndarray, grayscale: bool = False, resize_max: int = None,
                dfactor: int = 8):
     image = image.astype(np.float32, copy=False)
@@ -159,14 +192,14 @@ def preprocess(image: np.ndarray, grayscale: bool = False, resize_max: int = Non
             image = resize_image(image, size_new, 'cv2_area')
             scale = np.array(size) / np.array(size_new)
 
-    resize_min = 1024
-    if resize_min:
-        scale = resize_min / max(size)
-        scale = min(scale, 1.25)
-        if scale > 1.0:
-            size_new = tuple(int(round(x*scale)) for x in size)
-            image = resize_image(image, size_new, 'cv2_area')
-            scale = np.array(size) / np.array(size_new)
+    # resize_min = 1024
+    # if resize_min:
+    #     scale = resize_min / max(size)
+    #     scale = min(scale, 1.25)
+    #     if scale > 1.0:
+    #         size_new = tuple(int(round(x*scale)) for x in size)
+    #         image = resize_image(image, size_new, 'cv2_area')
+    #         scale = np.array(size) / np.array(size_new)
             
     if grayscale:
         assert image.ndim == 2, image.shape
@@ -183,6 +216,26 @@ def preprocess(image: np.ndarray, grayscale: bool = False, resize_max: int = Non
     scale = np.array(size) / np.array(size_new)[::-1]
     return image, scale
 
+def preprocess_rot(image: np.ndarray, grayscale: bool = False, resize_max: int = None,
+               dfactor: int = 8):
+    image = image.astype(np.float32, copy=False)
+    size = image.shape[:2][::-1]
+    scale = np.array([1.0, 1.0])
+
+    if grayscale:
+        assert image.ndim == 2, image.shape
+        image = image[None]
+    else:
+        image = image.transpose((2, 0, 1))  # HxWxC to CxHxW
+    image = torch.from_numpy(image / 255.0).float()
+
+    # assure that the size is divisible by dfactor
+    size_new = tuple(map(
+            lambda x: int(x // dfactor * dfactor),
+            image.shape[-2:]))
+    image = F.resize(image, size=size_new)
+    scale = np.array(size) / np.array(size_new)[::-1]
+    return image, scale
 
 def preprocess_loftr(image: np.ndarray, grayscale: bool = False, resize_max: int = 640, dfactor: int = 8):
     """
@@ -233,7 +286,6 @@ def preprocess_loftr(image: np.ndarray, grayscale: bool = False, resize_max: int
 
     return image, scale
 
-
 def compute_geom(data,
                  ransac_method=DEFAULT_RANSAC_METHOD,
                  ransac_reproj_threshold=DEFAULT_RANSAC_REPROJ_THRESHOLD,
@@ -283,7 +335,6 @@ def compute_geom(data,
 
     return geo_info
 
-
 def wrap_images(img0, img1, geo_info, geom_type):
     img0 = img0[0].permute((1, 2, 0)).cpu().detach().numpy()[..., ::-1]
     img1 = img1[0].permute((1, 2, 0)).cpu().detach().numpy()[..., ::-1]
@@ -322,7 +373,6 @@ def wrap_images(img0, img1, geo_info, geom_type):
 
     return img
 
-
 def plot_images(imgs, titles=None, cmaps="gray", dpi=100, size=5, pad=0.5):
     """Plot a set of images horizontally.
     Args:
@@ -356,7 +406,6 @@ def plot_images(imgs, titles=None, cmaps="gray", dpi=100, size=5, pad=0.5):
 
     return fig
 
-
 def fig2im(fig):
     fig.canvas.draw()
     w, h = fig.canvas.get_width_height()
@@ -364,7 +413,6 @@ def fig2im(fig):
     # noinspection PyArgumentList
     im = buf_ndarray.reshape(h, w, 4)
     return im
-
 
 def get_padding_size(image, h, w):
     orig_width = image.shape[3]
@@ -383,6 +431,21 @@ def get_padding_size(image, h, w):
     pad_right = pad_width - pad_left
 
     return orig_width, orig_height, pad_left, pad_right, pad_top, pad_bottom
+
+def rotate_tensor_kornia(tensor, angle_degrees):
+    """
+    使用kornia旋转张量
+    tensor: 输入张量 [B, C, H, W]
+    angle_degrees: 旋转角度（整数）
+    """
+    # 确保tensor是4D的（批次、通道、高度、宽度）
+    if tensor.dim() == 3:
+        tensor = tensor.unsqueeze(0)
+    
+    # 使用kornia的旋转函数
+    rotated = kornia.geometry.transform.rotate(tensor, torch.tensor([angle_degrees]))
+    
+    return rotated
 
 class Lightglue_Matcher():
     def __init__(self, device, num_features=4096):
@@ -447,7 +510,7 @@ class Lightglue_Matcher():
         self.model_yolo = model_yolo.eval().to(device)
         self.model_loftr = model_loftr.eval().to(device)
 
-    def loftr_extract(self, img_path0, resize=False):
+    def loftr_extract(self, img_path0, resize=True):
         device = self.device
         image0_ori = read_image(img_path0)
         if resize:
@@ -477,8 +540,8 @@ class Lightglue_Matcher():
         with torch.no_grad():
             with torch.cuda.amp.autocast():
                 self.model_loftr.forward_match(data)
-        kpts0 = data['mkpts0_f']
-        kpts1 = data['mkpts1_f']
+        kpts0 = data['mkpts0_c']
+        kpts1 = data['mkpts1_c']
         b_ids = data['m_bids']
         mconf = data['mconf']
 
@@ -581,6 +644,120 @@ class Lightglue_Matcher():
         pred['keypoints_refine0'] = torch.cat([kp * s for kp, s in zip(pred['keypoints_refine0'], data['scale0'][:, None])])
         
         return pred, data
+
+    def extract_rot(self, img_path0, nms_radius=5):
+        #旋转0 90 180 270分别提取点和描述
+        device = self.device
+        gray0_rot = read_image_rot(img_path0, grayscale=True)
+        pred_rot = []
+        data_rot = []
+        for _rot, gray0 in enumerate(gray0_rot):
+            gray0, scale0 = preprocess_rot(gray0, grayscale=True)
+
+            gray0 = gray0.to(device)[None]
+            scale0 = torch.tensor(scale0).to(device)[None]
+
+            data = {}
+            data.update(dict(gray0=gray0))
+
+            size0 = torch.tensor(data["gray0"].shape[-2:][::-1])[None]
+
+            data.update(dict(size0=size0))
+            data.update(dict(scale0=scale0))
+
+            pred = {}
+            with torch.no_grad():
+                pred.update({k + '0': v for k, v in self.detector({
+                    "image": data["gray0"],
+                }).items()})
+
+            # 获取特征点和分数
+            keypoints = pred['keypoints0']
+            descriptors = pred['descriptors0']
+            scores = pred['scores0']
+
+            # 按分数降序排序
+            indices = torch.argsort(scores[0], descending=True)
+            
+            # 应用空间NMS，但保留所有点
+            keypoints_np = keypoints[0, indices].cpu().numpy()
+            scores_np = scores[0, indices].cpu().numpy()
+            keep_indices = []  # NMS保留的点
+            suppressed_indices = []  # NMS抑制的点
+            
+            # 创建一个掩码标记已选择的区域
+            h, w = data['gray0'].shape[2:]
+            mask = np.zeros((h, w), dtype=bool)
+            
+            # 第一轮：选择要保留的点
+            for i in range(len(keypoints_np)):
+                x, y = int(keypoints_np[i, 0]), int(keypoints_np[i, 1])
+                # 检查点是否在图像中
+                if 0 <= x < w and 0 <= y < h:
+                    # 检查该区域是否已被选择
+                    roi = mask[max(0, y-nms_radius):min(h, y+nms_radius+1), 
+                            max(0, x-nms_radius):min(w, x+nms_radius+1)]
+                    if not np.any(roi):
+                        # 更新掩码
+                        mask[max(0, y-nms_radius):min(h, y+nms_radius+1), 
+                            max(0, x-nms_radius):min(w, x+nms_radius+1)] = True
+                        keep_indices.append(i)
+                    else:
+                        # 记录被抑制的点
+                        suppressed_indices.append(i)
+                else:
+                    # 超出图像的点也归为被抑制
+                    suppressed_indices.append(i)
+            
+            # 转换为PyTorch索引
+            keep_indices = torch.tensor(keep_indices, device=device)
+            suppressed_indices = torch.tensor(suppressed_indices, device=device)
+            
+            # 创建新的索引顺序：先是通过NMS的点，然后是被抑制的点
+            new_indices = torch.cat([
+                indices[keep_indices],  # 通过NMS的高分点
+                indices[suppressed_indices]  # 被抑制的低分点
+            ])
+            
+            # 重新排序特征点和描述符
+            keypoints = keypoints[:,new_indices]
+            descriptors = descriptors[:,new_indices]
+            scores = scores[:, new_indices]
+            
+            #根据角度旋转特征点
+            if _rot == 1:
+                data_rec = copy.deepcopy(data)
+                data_rec['size0'] = torch.tensor([[data['size0'][0][1], data['size0'][0][0]]]).to(device)
+                data_rec['scale0'] = torch.tensor([[data['scale0'][0][1], data['scale0'][0][0]]]).to(device)
+                keypoints_rec = torch.stack([keypoints[:, :, 1], -keypoints[:, :, 0]], dim=2).to(device)
+                keypoints_rec[:,:,1] = keypoints_rec[:,:,1] + data_rec['size0'][0][1]
+            elif _rot == 2:
+                data_rec = copy.deepcopy(data)
+                keypoints_rec = torch.stack([-keypoints[:, :, 0], -keypoints[:, :, 1]], dim=2).to(device)
+                keypoints_rec[:, :, 0] = keypoints_rec[:, :, 0] + data_rec['size0'][0][0]
+                keypoints_rec[:, :, 1] = keypoints_rec[:, :, 1] + data_rec['size0'][0][1]
+            elif _rot == 3:
+                data_rec = copy.deepcopy(data)
+                data_rec['size0'] = torch.tensor([[data['size0'][0][1], data['size0'][0][0]]]).to(device)
+                data_rec['scale0'] = torch.tensor([[data['scale0'][0][1], data['scale0'][0][0]]]).to(device)
+                keypoints_rec = torch.stack([-keypoints[:, :, 1], keypoints[:, :, 0]], dim=2).to(device)
+                keypoints_rec[:, :, 0] = keypoints_rec[:, :, 0] + data_rec['size0'][0][0]
+            else:
+                data_rec = copy.deepcopy(data)
+                keypoints_rec = keypoints
+            
+            # 更新排序后的结果
+            pred['keypoints0'] = keypoints
+            pred['keypoints0_rec'] = keypoints_rec
+            pred['descriptors0'] = descriptors
+            pred['scores0'] = scores
+
+            pred['keypoints0'] = torch.cat([kp * s for kp, s in zip(pred['keypoints0'], data['scale0'][:, None])])
+            pred['keypoints0_rec'] = torch.cat([kp * s for kp, s in zip(pred['keypoints0_rec'], data_rec['scale0'][:, None])])
+
+            pred_rot.append(pred)
+            data_rot.append(data)
+        return pred_rot, data_rot
 
     def get_person_mask(self, img_path0):
         return person_mask(img_path0, self.model_yolo)

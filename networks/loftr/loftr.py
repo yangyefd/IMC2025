@@ -126,13 +126,13 @@ class LoFTR(nn.Module):
         # 3. match coarse-level
         self.coarse_matching(feat_c0, feat_c1, data, mask_c0=mask_c0, mask_c1=mask_c1)
 
-        # 4. fine-level refinement
-        feat_f0_unfold, feat_f1_unfold = self.fine_preprocess(feat_f0, feat_f1, feat_c0, feat_c1, data)
-        if feat_f0_unfold.size(0) != 0:  # at least one coarse level predicted
-            feat_f0_unfold, feat_f1_unfold = self.loftr_fine(feat_f0_unfold, feat_f1_unfold)
+        # # 4. fine-level refinement
+        # feat_f0_unfold, feat_f1_unfold = self.fine_preprocess(feat_f0, feat_f1, feat_c0, feat_c1, data)
+        # if feat_f0_unfold.size(0) != 0:  # at least one coarse level predicted
+        #     feat_f0_unfold, feat_f1_unfold = self.loftr_fine(feat_f0_unfold, feat_f1_unfold)
 
-        # 5. match fine-level
-        self.fine_matching(feat_f0_unfold, feat_f1_unfold, data)
+        # # 5. match fine-level
+        # self.fine_matching(feat_f0_unfold, feat_f1_unfold, data)
     
     def forward_coarse(self, data):
         """粗匹配forward pass

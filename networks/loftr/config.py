@@ -27,7 +27,7 @@ _CN.LOFTR.COARSE.ATTENTION = 'linear'  # options: ['linear', 'full']
 
 # 3. Coarse-Matching config
 _CN.LOFTR.MATCH_COARSE = CN()
-_CN.LOFTR.MATCH_COARSE.THR = 0.2
+_CN.LOFTR.MATCH_COARSE.THR = 0.4 #0.2
 _CN.LOFTR.MATCH_COARSE.BORDER_RM = 2
 _CN.LOFTR.MATCH_COARSE.MATCH_TYPE = 'dual_softmax'  # options: ['dual_softmax, 'sinkhorn']
 _CN.LOFTR.MATCH_COARSE.DSMAX_TEMPERATURE = 0.1
