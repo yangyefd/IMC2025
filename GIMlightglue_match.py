@@ -82,7 +82,58 @@ def read_image_rot(path, grayscale=False):
 
     return images_rot
 
+def read_image_mr(path, grayscale=False):
+    """
+    多分辨率处理,
+    若输入图像尺寸小于800，则向上取1.2倍，1.44倍三个分辨率[1,1.2,1.44]
+    若输入图像大于1920，向下取1.2倍，1.44倍三个分辨率[1,0.8,0.65]
+    否则图像分别向上，向下取1.2分辨率[1,1.2,0.8]
 
+    """
+    if grayscale:
+        mode = cv2.IMREAD_GRAYSCALE
+    else:
+        mode = cv2.IMREAD_COLOR
+
+    # 读取图像
+    image = cv2.imread(str(path), mode)
+    if image is None:
+        raise ValueError(f'Cannot read image {path}.')
+    if not grayscale and len(image.shape) == 3:
+        image = image[:, :, ::-1]  # BGR to RGB
+    
+    # 获取图像尺寸
+    h, w = image.shape[:2]
+    max_dim = max(h, w)
+    
+    # 根据图像尺寸确定缩放比例
+    if max_dim < 800:
+        # 小图像: 原始、放大1.2倍、放大1.44倍
+        scales = [1.0, 1.2, 1.44]
+    elif max_dim > 1920:
+        # 大图像: 原始、缩小0.8倍、缩小0.65倍
+        scales = [1.0, 0.8, 0.65]
+    else:
+        # 中等尺寸图像: 原始、放大1.2倍、缩小0.8倍
+        scales = [1.0, 1.2, 0.8]
+    scales = [1.2, 1.2, 1.2]
+    # 生成多分辨率图像
+    images_mr = []
+    for scale in scales:
+        if scale == 1.0:
+            # 原始尺寸
+            images_mr.append(image)
+        else:
+            # 计算新尺寸
+            new_w = int(round(w * scale))
+            new_h = int(round(h * scale))
+            # 选择合适的插值方法
+            interp = cv2.INTER_LINEAR if scale > 1.0 else cv2.INTER_AREA
+            # 调整图像大小
+            resized = cv2.resize(image, (new_w, new_h), interpolation=interp)
+            images_mr.append(resized)
+
+    return images_mr, scales
 
 def resize_image(image, size, interp):
     assert interp.startswith('cv2_')
@@ -463,7 +514,7 @@ class Lightglue_Matcher():
             'max_num_keypoints': num_features,
             'force_num_keypoints': True,
             'detection_threshold': 0.0,
-            'nms_radius': 3,
+            'nms_radius': 2,
             "refinement_radius": 0,
             'trainable': False,
         })
@@ -645,7 +696,7 @@ class Lightglue_Matcher():
         
         return pred, data
 
-    def extract_rot(self, img_path0, nms_radius=5):
+    def extract_rot(self, img_path0, nms_radius=3):
         #旋转0 90 180 270分别提取点和描述
         device = self.device
         gray0_rot = read_image_rot(img_path0, grayscale=True)
@@ -758,6 +809,100 @@ class Lightglue_Matcher():
             pred_rot.append(pred)
             data_rot.append(data)
         return pred_rot, data_rot
+
+    def extract_mr(self, img_path0, nms_radius=3):
+        #
+        device = self.device
+        gray0_mr, scales_mr = read_image_mr(img_path0, grayscale=True)
+        pred_mr = []
+        data_mr = []
+        for _rot, gray0 in enumerate(gray0_mr):
+            gray0, scale0 = preprocess(gray0, grayscale=True)
+
+            gray0 = gray0.to(device)[None]
+            scale0 = torch.tensor(scale0).to(device)[None]
+
+            data = {}
+            data.update(dict(gray0=gray0))
+
+            size0 = torch.tensor(data["gray0"].shape[-2:][::-1])[None]
+
+            data.update(dict(size0=size0))
+            data.update(dict(scale0=scale0))
+
+            pred = {}
+            with torch.no_grad():
+                pred.update({k + '0': v for k, v in self.detector({
+                    "image": data["gray0"],
+                }).items()})
+
+            # 获取特征点和分数
+            keypoints = pred['keypoints0']
+            descriptors = pred['descriptors0']
+            scores = pred['scores0']
+
+            # 按分数降序排序
+            indices = torch.argsort(scores[0], descending=True)
+            
+            # 应用空间NMS，但保留所有点
+            keypoints_np = keypoints[0, indices].cpu().numpy()
+            scores_np = scores[0, indices].cpu().numpy()
+            keep_indices = []  # NMS保留的点
+            suppressed_indices = []  # NMS抑制的点
+            
+            # 创建一个掩码标记已选择的区域
+            h, w = data['gray0'].shape[2:]
+            mask = np.zeros((h, w), dtype=bool)
+            
+            # 第一轮：选择要保留的点
+            for i in range(len(keypoints_np)):
+                x, y = int(keypoints_np[i, 0]), int(keypoints_np[i, 1])
+                # 检查点是否在图像中
+                if 0 <= x < w and 0 <= y < h:
+                    # 检查该区域是否已被选择
+                    roi = mask[max(0, y-nms_radius):min(h, y+nms_radius+1), 
+                            max(0, x-nms_radius):min(w, x+nms_radius+1)]
+                    if not np.any(roi):
+                        # 更新掩码
+                        mask[max(0, y-nms_radius):min(h, y+nms_radius+1), 
+                            max(0, x-nms_radius):min(w, x+nms_radius+1)] = True
+                        keep_indices.append(i)
+                    else:
+                        # 记录被抑制的点
+                        suppressed_indices.append(i)
+                else:
+                    # 超出图像的点也归为被抑制
+                    suppressed_indices.append(i)
+            
+            # 转换为PyTorch索引
+            keep_indices = torch.tensor(keep_indices, device=device)
+            suppressed_indices = torch.tensor(suppressed_indices, device=device)
+            
+            # 创建新的索引顺序：先是通过NMS的点，然后是被抑制的点
+            new_indices = torch.cat([
+                indices[keep_indices],  # 通过NMS的高分点
+                indices[suppressed_indices]  # 被抑制的低分点
+            ])
+            
+            # 重新排序特征点和描述符
+            keypoints = keypoints[:,new_indices]
+            descriptors = descriptors[:,new_indices]
+            scores = scores[:, new_indices]
+            
+            # 更新排序后的结果
+            pred['keypoints0'] = keypoints
+            pred['descriptors0'] = descriptors
+            pred['scores0'] = scores
+
+            #
+            # pred['keypoints0'] /= scales_mr[_rot]
+            data['scale0'] /= scales_mr[_rot]
+            pred['keypoints0'] = torch.cat([kp * s for kp, s in zip(pred['keypoints0'], data['scale0'][:, None])])
+            data['scale0'] *= scales_mr[_rot]
+
+            pred_mr.append(pred)
+            data_mr.append(data)
+        return pred_mr, data_mr
 
     def get_person_mask(self, img_path0):
         return person_mask(img_path0, self.model_yolo)
