@@ -116,7 +116,7 @@ def read_image_mr(path, grayscale=False):
     else:
         # 中等尺寸图像: 原始、放大1.2倍、缩小0.8倍
         scales = [1.0, 1.2, 0.8]
-    scales = [1.2, 1.2, 1.2]
+
     # 生成多分辨率图像
     images_mr = []
     for scale in scales:
@@ -895,10 +895,10 @@ class Lightglue_Matcher():
             pred['scores0'] = scores
 
             #
-            # pred['keypoints0'] /= scales_mr[_rot]
-            data['scale0'] /= scales_mr[_rot]
+            pred['keypoints0'] /= scales_mr[_rot]
+            # data['scale0'] /= scales_mr[_rot]
             pred['keypoints0'] = torch.cat([kp * s for kp, s in zip(pred['keypoints0'], data['scale0'][:, None])])
-            data['scale0'] *= scales_mr[_rot]
+            # data['scale0'] *= scales_mr[_rot]
 
             pred_mr.append(pred)
             data_mr.append(data)
