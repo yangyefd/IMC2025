@@ -171,7 +171,7 @@ def get_image_pairs_shortlist_clip(fnames, sim_th=0.6, min_pairs=20, exhaustive_
 def detect_aliked(img_fnames, feature_dir='.featureout', num_features=4096, 
                  resize_to=1024, device=torch.device('cpu')):
     dtype = torch.float32
-    extractor = ALIKED(max_num_keypoints=num_features, detection_threshold=0.01, 
+    extractor = ALIKED(max_num_keypoints=num_features, detection_threshold=0.2, 
                      resize=resize_to).eval().to(device, dtype)
     if not os.path.isdir(feature_dir):
         os.makedirs(feature_dir)
@@ -180,6 +180,7 @@ def detect_aliked(img_fnames, feature_dir='.featureout', num_features=4096,
         for img_path in tqdm(img_fnames):
             img_fname = img_path.split('/')[-1]
             key = img_fname
+            key = key.split('\\')[-1]
             with torch.inference_mode():
                 image0 = load_torch_image(img_path, device=device).to(dtype)
                 feats0 = extractor.extract(image0)
@@ -1644,9 +1645,13 @@ def second_match_ensemble(mkpts1, mkpts2, idxs, features_data, key1, key2, lg_ma
     all_kp2 = features_data[key2]['kp'][startidx:].clone()
     all_desc1 = features_data[key1]['desc'][startidx:,:128].clone()
     all_desc2 = features_data[key2]['desc'][startidx:,:128].clone()
-    fp_maks1 = features_data[key1]['mask'].clone()
-    fp_maks2 = features_data[key2]['mask'].clone()
-    
+    fp_maks1 = features_data[key1]['mask'].clone()[-1]
+    fp_maks2 = features_data[key2]['mask'].clone()[-1]
+    all_kp1 = all_kp1[:fp_maks1]
+    all_kp2 = all_kp2[:fp_maks2]
+    all_desc1 = all_desc1[:fp_maks1]
+    all_desc2 = all_desc2[:fp_maks2]
+
     # 为每个聚类创建掩码，判断哪些点在聚类区域内
     all_kp1_np = all_kp1.cpu().numpy()
     all_kp2_np = all_kp2.cpu().numpy()
@@ -1773,9 +1778,9 @@ def second_match_ensemble(mkpts1, mkpts2, idxs, features_data, key1, key2, lg_ma
         }
 
         with torch.inference_mode():
-            region_dist, region_idxs = lg_matcher(region_pred['descriptors0'][:fp_maks1[1]].float(), region_pred['descriptors1'][:fp_maks2[1]].float(),
-                KF.laf_from_center_scale_ori(region_pred['keypoints0'][:,:fp_maks1[-1]].float()),
-                KF.laf_from_center_scale_ori(region_pred['keypoints1'][:,:fp_maks2[-1]].float()))
+            region_dist, region_idxs = lg_matcher(region_pred['descriptors0'].float(), region_pred['descriptors1'].float(),
+                KF.laf_from_center_scale_ori(region_pred['keypoints0'].float()),
+                KF.laf_from_center_scale_ori(region_pred['keypoints1'].float()))
             region_valid_mask = (region_dist > 0.25)
             region_dist = region_dist[region_valid_mask[:,0]]
             region_idxs = region_idxs[region_valid_mask[:,0]]
@@ -2980,9 +2985,11 @@ def match_with_gimlightglue_ensemble_rot(lightglue_matcher, img_fnames, index_pa
                     
                     idx1, idx2, key1, key2, fname1, fname2 = batch_info[i]
 
+                    if f'{key1}_{key2}' in "stairs_split_1_1710453620694_comparison.png_stairs_split_1_1710453626698_comparison.png":
+                        print('hh')
                     # 找到分数最大的旋转索引
                     best_rotation_idx = int(np.argmax(rotation_scores))
-                    best_rotation_idx = best_rotation_idx if rotation_scores[best_rotation_idx] > 1.25*rotation_scores[0] else 0
+                    best_rotation_idx = best_rotation_idx if rotation_scores[best_rotation_idx] > 1.1*rotation_scores[0] else 0
                     if best_rotation_idx > 0:
                         print('hh')
                     batch_rot_idxs.append(4*i + best_rotation_idx)
@@ -3768,6 +3775,7 @@ def match_with_lightglue(img_fnames, index_pairs, feature_dir='.featureout',
             idx1, idx2 = pair_idx
             fname1, fname2 = img_fnames[idx1], img_fnames[idx2]
             key1, key2 = fname1.split('/')[-1], fname2.split('/')[-1]
+            key1, key2 = key1.split('\\')[-1], key2.split('\\')[-1]
             kp1 = torch.from_numpy(f_kp[key1][...]).to(device)
             kp2 = torch.from_numpy(f_kp[key2][...]).to(device)
             desc1 = torch.from_numpy(f_desc[key1][...]).to(device)
@@ -4059,7 +4067,7 @@ if is_OneTest:
 else:
     dataset_train_test_lst = [
         'ETs',
-        'stairs'
+        # 'stairs'
         # 'imc2023_heritage'
     ]
     
@@ -4112,8 +4120,8 @@ for dataset, predictions in samples.items():
     # print(f'person_mask in {time() - t:.4f} sec')
 
     t = time()
-    # detect_aliked(images, feature_dir, 4096, device=device)
-    detect_sp_ensemble_rot(lightglue_matcher, images, feature_dir, 4096, device=device)
+    detect_aliked(images, feature_dir, 4096, device=device)
+    # detect_sp_ensemble_rot(lightglue_matcher, images, feature_dir, 4096, device=device)
     timings['feature_detection'].append(time() - t)
     print(f'Features detected in {time() - t:.4f} sec')
 
@@ -4123,10 +4131,10 @@ for dataset, predictions in samples.items():
     # timings['feature_detection'].append(time() - t)
     # print(f'Features detected in {time() - t:.4f} sec')
         
-    # t = time()
-    # match_with_lightglue(images, index_pairs, feature_dir=feature_dir, device=device, verbose=False)
-    # timings['feature_matching'].append(time() - t)
-    # print(f'Features matched in {time() - t:.4f} sec')
+    t = time()
+    match_with_lightglue(images, index_pairs, feature_dir=feature_dir, device=device, verbose=False)
+    timings['feature_matching'].append(time() - t)
+    print(f'Features matched in {time() - t:.4f} sec')
 
     # # 3. 微调LightGlue
     # t = time()
@@ -4142,13 +4150,13 @@ for dataset, predictions in samples.items():
     # print(f'模型微调完成，耗时 {time() - t:.4f} sec')
     
 
-    t = time()
-    # match_matrix = match_with_gimloftr(lightglue_matcher, images, index_pairs, feature_dir=feature_dir, device=device, verbose=False)
-    match_matrix = match_with_gimlightglue_ensemble_rot(lightglue_matcher, images, index_pairs, feature_dir=feature_dir, device=device, verbose=False)
-    # match_matrix = refine_matches(lightglue_matcher, images, index_pairs, feature_dir=feature_dir, device=device, verbose=False)
-    timings['feature_matching'].append(time() - t)
-    print(f'Features matched in {time() - t:.4f} sec')
-    print('match_matrix', match_matrix.sum())
+    # t = time()
+    # # match_matrix = match_with_gimloftr(lightglue_matcher, images, index_pairs, feature_dir=feature_dir, device=device, verbose=False)
+    # match_matrix = match_with_gimlightglue_ensemble_rot(lightglue_matcher, images, index_pairs, feature_dir=feature_dir, device=device, verbose=False)
+    # # match_matrix = refine_matches(lightglue_matcher, images, index_pairs, feature_dir=feature_dir, device=device, verbose=False)
+    # timings['feature_matching'].append(time() - t)
+    # print(f'Features matched in {time() - t:.4f} sec')
+    # print('match_matrix', match_matrix.sum())
 
     # exit()
     #删除无用文件
