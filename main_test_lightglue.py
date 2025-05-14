@@ -515,6 +515,7 @@ def detect_sp_ensemble_mr(lightglue_matcher, img_fnames, feature_dir='.featureou
     if not os.path.isdir(feature_dir):
         os.makedirs(feature_dir)
     with h5py.File(f'{feature_dir}/keypoints.h5', mode='w') as f_kp, \
+         h5py.File(f'{feature_dir}/keypoints_mr.h5', mode='w') as f_kp_mr, \
          h5py.File(f'{feature_dir}/descriptors.h5', mode='w') as f_desc, \
          h5py.File(f'{feature_dir}/size.h5', mode='w') as f_size,\
          h5py.File(f'{feature_dir}/scale.h5', mode='w') as f_scale,\
@@ -525,27 +526,34 @@ def detect_sp_ensemble_mr(lightglue_matcher, img_fnames, feature_dir='.featureou
             key = img_fname
             with torch.inference_mode():
                 kpts = np.zeros((num_features*4,2)).astype(np.float32)
+                kpts_mr = np.zeros((num_features*4,2)).astype(np.float32)
                 descs = np.zeros((num_features*4,256)).astype(np.float32)
+                data_size = np.zeros((3,2)).astype(np.float32)
+                data_scale = np.zeros((3,2)).astype(np.float32)
                 feats0_lst, data_lst = lightglue_matcher.extract_mr(img_path)
-                data = data_lst[0]
+                data = data_lst
                 pts_mask = []
                 for idx, feats0 in enumerate(feats0_lst):
                     feats0_kpts = feats0['keypoints0'].reshape(-1, 2).detach().cpu().numpy()
                     kpts[idx*num_features:idx*num_features+len(feats0_kpts)] = feats0['keypoints0'].reshape(-1, 2).detach().cpu().numpy()
-
+                    kpts_mr[idx*num_features:idx*num_features+len(feats0_kpts)] = feats0['keypoints0_mr'].reshape(-1, 2).detach().cpu().numpy()
                     descs[idx*num_features:idx*num_features+len(feats0_kpts)] = feats0['descriptors0'].reshape(len(feats0_kpts), -1).detach().cpu().numpy()
                     pts_mask += [len(feats0_kpts)]
+                    data_size[idx] = data_lst[idx]['size0'].cpu()
+                    data_scale[idx] = data_lst[idx]['scale0'].cpu()
                 image0 = load_torch_image(img_path, device=device).to(dtype)
                 feats0_alike = extractor_alike.extract(image0)
                 feats0_alike_pkts = feats0_alike['keypoints'].reshape(-1, 2).detach().cpu().numpy()
                 kpts[num_features*3:num_features*3+len(feats0_alike_pkts)] = feats0_alike_pkts
+                kpts_mr[num_features*3:num_features*3+len(feats0_alike_pkts)] = feats0_alike_pkts
                 descs[num_features*3:num_features*3+len(feats0_alike_pkts),:128] = feats0_alike['descriptors'].reshape(len(feats0_alike_pkts), -1).detach().cpu().numpy()
                 pts_mask += [len(feats0_alike_pkts)]
 
                 f_kp[key] = kpts
+                f_kp_mr[key] = kpts_mr
                 f_desc[key] = descs
-                f_size[key] = data['size0'].cpu()
-                f_scale[key] = data['scale0'].cpu()
+                f_size[key] = data_size
+                f_scale[key] = data_scale
                 f_mask[key] = np.array(pts_mask)
 
     return
@@ -1541,7 +1549,7 @@ def second_match_ensemble(mkpts1, mkpts2, idxs, features_data, key1, key2, lg_ma
         region_dists: 匹配置信度
         mapped_idxs: 映射回原始索引的匹配结果
     """
-    
+
     # 将原始匹配对转换为集合形式，便于快速查找
     orig_idxs = idxs.clone().cpu().numpy()
     orig_matches_set = {(int(idx[0])) for idx in orig_idxs}
@@ -1571,7 +1579,7 @@ def second_match_ensemble(mkpts1, mkpts2, idxs, features_data, key1, key2, lg_ma
     clusters = []
     visited = set()
 
-    def dfs(i, cluster):
+    def dfs_rec(i, cluster):
         if i in visited:
             return
         visited.add(i)
@@ -1586,6 +1594,25 @@ def second_match_ensemble(mkpts1, mkpts2, idxs, features_data, key1, key2, lg_ma
         if l2 != -1:
             for j in adj[f'2_{l2}']:
                 dfs(j, cluster)
+
+    def dfs(i, cluster):
+        stack = [i]
+        while stack:
+            curr = stack.pop()
+            if curr in visited:
+                continue
+            visited.add(curr)
+            cluster.add(curr)
+            l1 = labels1[curr]
+            l2 = labels2[curr]
+            if l1 != -1:
+                for j in adj[f'1_{l1}']:
+                    if j not in visited:
+                        stack.append(j)
+            if l2 != -1:
+                for j in adj[f'2_{l2}']:
+                    if j not in visited:
+                        stack.append(j)
 
     # 初始化最终标签为 -1
     merged_labels = -1 * np.ones(n, dtype=int)
@@ -3123,7 +3150,7 @@ def match_nms(dists, idxs, batch_info, features_data, radius=3):
     return filtered_dists, filtered_idxs
 
 def match_with_gimlightglue_ensemble_mr(lightglue_matcher, img_fnames, index_pairs, feature_dir='.featureout', 
-                                           device=torch.device('cpu'), min_matches=15, batch_size=2, 
+                                           device=torch.device('cpu'), min_matches=20, batch_size=2, 
                                            tok_limit=1200, match_limit=4096, verbose=True, visualize=True):
     """
     使用批处理方式进行特征匹配，点数不会超过 max_points，但可能小于。
@@ -3151,6 +3178,7 @@ def match_with_gimlightglue_ensemble_mr(lightglue_matcher, img_fnames, index_pai
     print("加载特征数据...")
     features_data = {}
     with h5py.File(f'{feature_dir}/keypoints.h5', mode='r') as f_kp, \
+         h5py.File(f'{feature_dir}/keypoints_mr.h5', mode='r') as f_kp_mr, \
          h5py.File(f'{feature_dir}/descriptors.h5', mode='r') as f_desc, \
          h5py.File(f'{feature_dir}/size.h5', mode='r') as f_size, \
          h5py.File(f'{feature_dir}/scale.h5', mode='r') as f_scale, \
@@ -3159,6 +3187,7 @@ def match_with_gimlightglue_ensemble_mr(lightglue_matcher, img_fnames, index_pai
             key = img_path.split('/')[-1].split('\\')[-1]
             features_data[key] = {
                 'kp': torch.from_numpy(f_kp[key][...]).to(device),
+                'kp_mr': torch.from_numpy(f_kp[key][...]).to(device),
                 'desc': torch.from_numpy(f_desc[key][...]).to(device),
                 'size': torch.from_numpy(f_size[key][...]).to(device),
                 'scale': torch.from_numpy(f_scale[key][...]).to(device),
@@ -3190,7 +3219,6 @@ def match_with_gimlightglue_ensemble_mr(lightglue_matcher, img_fnames, index_pai
             batch_pairs = batch_pairs_lst[start_idx:end_idx]
             
             batch_data = []
-            batch_data_mr = []
             batch_info = []
             
             # 准备批次数据
@@ -3203,59 +3231,67 @@ def match_with_gimlightglue_ensemble_mr(lightglue_matcher, img_fnames, index_pai
                 # 获取图像特征
                 kp1 = features_data[key1]['kp']
                 kp2 = features_data[key2]['kp']
+                kp1_mr = features_data[key1]['kp_mr']
+                kp2_mr = features_data[key2]['kp_mr']
                 desc1 = features_data[key1]['desc']
                 desc2 = features_data[key2]['desc']
 
                 pred_mr0 = {
                     'keypoints0': kp1[:match_limit][None],
                     'keypoints1': kp2[:match_limit][None],
+                    'keypoints0_mr': kp1_mr[:match_limit][None],
+                    'keypoints1_mr': kp2_mr[:match_limit][None],
                     'descriptors0': desc1[:match_limit][None],
                     'descriptors1': desc2[:match_limit][None],
-                    'size0': features_data[key1]['size'],
-                    'size1': features_data[key2]['size'],
-                    'scale0': features_data[key1]['scale'],
-                    'scale1': features_data[key2]['scale'],
+                    'size0': features_data[key1]['size'][0][None],
+                    'size1': features_data[key2]['size'][0][None],
+                    'scale0': features_data[key1]['scale'][0][None],
+                    'scale1': features_data[key2]['scale'][0][None],
                 }
                 pred_mr1 = {
                     'keypoints0': kp1[:match_limit][None],
                     'keypoints1': kp2[match_limit:2*match_limit][None],
+                    'keypoints0_mr': kp1_mr[:match_limit][None],
+                    'keypoints1_mr': kp2_mr[match_limit:2*match_limit][None],
                     'descriptors0': desc1[:match_limit][None],
                     'descriptors1': desc2[match_limit:2*match_limit][None],
-                    'size0': features_data[key1]['size'],
-                    'size1': features_data[key2]['size'],
-                    'scale0': features_data[key1]['scale'],
-                    'scale1': features_data[key2]['scale'],
+                    'size0': features_data[key1]['size'][0][None],
+                    'size1': features_data[key2]['size'][1][None],
+                    'scale0': features_data[key1]['scale'][0][None],
+                    'scale1': features_data[key2]['scale'][1][None],
                 }
                 pred_mr2 = {
                     'keypoints0': kp1[:match_limit][None],
                     'keypoints1': kp2[2*match_limit:3*match_limit][None],
+                    'keypoints0_mr': kp1_mr[:match_limit][None],
+                    'keypoints1_mr': kp2_mr[2*match_limit:3*match_limit][None],
                     'descriptors0': desc1[:match_limit][None],
                     'descriptors1': desc2[2*match_limit:3*match_limit][None],
-                    'size0': features_data[key1]['size'],
-                    'size1': features_data[key2]['size'],
-                    'scale0': features_data[key1]['scale'],
-                    'scale1': features_data[key2]['scale'],
+                    'size0': features_data[key1]['size'][0][None],
+                    'size1': features_data[key2]['size'][2][None],
+                    'scale0': features_data[key1]['scale'][0][None],
+                    'scale1': features_data[key2]['scale'][2][None],
                 }
 
                 batch_data.append(pred_mr0)
-                batch_data_mr.append(pred_mr1)
-                batch_data_mr.append(pred_mr2)
+                batch_data.append(pred_mr1)
+                batch_data.append(pred_mr2)
                 batch_info.append((idx1, idx2, key1, key2, fname1, fname2))
             
             # 批量匹配
             # print(f"处理批次 {batch_idx+1}/{num_batches} ({len(batch_pairs)} 对图像)...")
             
-            mr_veryfy_num = 2048
+            mr_veryfy_num = 1024
             # 合并批次预测数据
             batch_preds_mr = {
-                'keypoints0': torch.cat([data['keypoints0'][:,:mr_veryfy_num] for data in batch_data_mr], dim=0).to(device),
-                'keypoints1': torch.cat([data['keypoints1'][:,:mr_veryfy_num] for data in batch_data_mr], dim=0).to(device),
-                'descriptors0': torch.cat([data['descriptors0'][:,:mr_veryfy_num] for data in batch_data_mr], dim=0).to(device),
-                'descriptors1': torch.cat([data['descriptors1'][:,:mr_veryfy_num] for data in batch_data_mr], dim=0).to(device),
-                'size0': torch.stack([data['size0'] for data in batch_data_mr], dim=0).to(device),
-                'size1': torch.stack([data['size1'] for data in batch_data_mr], dim=0).to(device),
-                'scale0': torch.stack([data['scale0'] for data in batch_data_mr], dim=0).to(device),
-                'scale1': torch.stack([data['scale1'] for data in batch_data_mr], dim=0).to(device),
+                'keypoints0': torch.cat([data['keypoints0_mr'][:,:mr_veryfy_num] for data in batch_data], dim=0).to(device),
+                'keypoints1': torch.cat([data['keypoints1_mr'][:,:mr_veryfy_num] for data in batch_data], dim=0).to(device),
+                'descriptors0': torch.cat([data['descriptors0'][:,:mr_veryfy_num] for data in batch_data], dim=0).to(device),
+                'descriptors1': torch.cat([data['descriptors1'][:,:mr_veryfy_num] for data in batch_data], dim=0).to(device),
+                'size0': torch.stack([data['size0'] for data in batch_data], dim=0).to(device),
+                'size1': torch.stack([data['size1'] for data in batch_data], dim=0).to(device),
+                'scale0': torch.stack([data['scale0'] for data in batch_data], dim=0).to(device),
+                'scale1': torch.stack([data['scale1'] for data in batch_data], dim=0).to(device),
             }
 
             # 批量推理 2个一组
@@ -3264,59 +3300,49 @@ def match_with_gimlightglue_ensemble_mr(lightglue_matcher, img_fnames, index_pai
                 
                 batch_dists_mr_select = []
                 batch_idxs_mr_select = []
+                batch_mr_idxs = []
                 for i in range(len(batch_pairs)):
                     batch_dists_mr_select_one = None
                     batch_idxs_mr_select_one = None
-                    batch_dists_mr_sample = batch_dists_mr[i*2:(i+1)*2]
-                    batch_idxs_mr_sample = batch_idxs_mr[i*2:(i+1)*2]
+                    batch_dists_mr_sample = batch_dists_mr[i*3:(i+1)*3]
+                    batch_idxs_mr_sample = batch_idxs_mr[i*3:(i+1)*3]
                     # 计算每个旋转的总分数
                     mr_scores = [dists.sum().item() if len(dists) > 0 else 0 for dists in batch_dists_mr_sample]
                     
                     idx1, idx2, key1, key2, fname1, fname2 = batch_info[i]
                     #修正mr索引
-                    batch_idxs_mr_sample[0][:,1] = batch_idxs_mr_sample[0][:,1] + match_limit
-                    batch_idxs_mr_sample[1][:,1] = batch_idxs_mr_sample[1][:,1] + 2*match_limit
+                    batch_idxs_mr_sample[1][:,1] = batch_idxs_mr_sample[1][:,1] + match_limit
+                    batch_idxs_mr_sample[2][:,1] = batch_idxs_mr_sample[2][:,1] + 2*match_limit
 
-                    #合并两个分辨率结果
-                    #若总分数差异过大，则选择分数高的
-                    if mr_scores[0] > 1.25*mr_scores[1]:
-                        batch_dists_mr_select_one = batch_dists_mr_sample[0]
-                        batch_idxs_mr_select_one = batch_idxs_mr_sample[0]
-                    elif mr_scores[1] > 1.25*mr_scores[0]:
-                        batch_dists_mr_select_one = batch_dists_mr_sample[1]
-                        batch_idxs_mr_select_one = batch_idxs_mr_sample[1]
-                    else:
-                        batch_dists_mr_select_one = torch.cat([batch_dists_mr_sample[0],batch_dists_mr_sample[1]])
-                        batch_idxs_mr_select_one = torch.cat([batch_idxs_mr_sample[0],batch_idxs_mr_sample[1]],dim=0)
-                    #若总分数过低直接舍去避免引入噪声
-                    if batch_dists_mr_select_one.sum() < 5:
-                        batch_dists_mr_select_one = None
-                        batch_idxs_mr_select_one = None
-                    
-                    batch_dists_mr_select.append(batch_dists_mr_select_one)
-                    batch_idxs_mr_select.append(batch_idxs_mr_select_one)
-                    
+                    # 找到分数最大的旋转索引
+                    best_mr_idx = int(np.argmax(mr_scores))
+                    # best_mr_idx = best_mr_idx if mr_scores[best_mr_idx] > 1.1*mr_scores[0] else 0
+                    if best_mr_idx > 0:
+                        if mr_scores[best_mr_idx] < 5:
+                            best_mr_idx = 0
+                    # best_mr_idx = 2
+                    batch_mr_idxs.append(3*i + best_mr_idx)
+
+                batch_data_select = [batch_data[i] for i in batch_mr_idxs]
                 # 合并批次预测数据
                 mr_veryfy_num = 4096
                 batch_preds = {
-                    'keypoints0': torch.cat([data['keypoints0'][:,:mr_veryfy_num] for data in batch_data], dim=0).to(device),
-                    'keypoints1': torch.cat([data['keypoints1'][:,:mr_veryfy_num] for data in batch_data], dim=0).to(device),
-                    'descriptors0': torch.cat([data['descriptors0'][:,:mr_veryfy_num] for data in batch_data], dim=0).to(device),
-                    'descriptors1': torch.cat([data['descriptors1'][:,:mr_veryfy_num] for data in batch_data], dim=0).to(device),
-                    'size0': torch.stack([data['size0'] for data in batch_data], dim=0).to(device),
-                    'size1': torch.stack([data['size1'] for data in batch_data], dim=0).to(device),
-                    'scale0': torch.stack([data['scale0'] for data in batch_data], dim=0).to(device),
-                    'scale1': torch.stack([data['scale1'] for data in batch_data], dim=0).to(device),
+                    'keypoints0': torch.cat([data['keypoints0_mr'][:,:mr_veryfy_num] for data in batch_data_select], dim=0).to(device),
+                    'keypoints1': torch.cat([data['keypoints1_mr'][:,:mr_veryfy_num] for data in batch_data_select], dim=0).to(device),
+                    'descriptors0': torch.cat([data['descriptors0'][:,:mr_veryfy_num] for data in batch_data_select], dim=0).to(device),
+                    'descriptors1': torch.cat([data['descriptors1'][:,:mr_veryfy_num] for data in batch_data_select], dim=0).to(device),
+                    'size0': torch.stack([data['size0'] for data in batch_data_select], dim=0).to(device),
+                    'size1': torch.stack([data['size1'] for data in batch_data_select], dim=0).to(device),
+                    'scale0': torch.stack([data['scale0'] for data in batch_data_select], dim=0).to(device),
+                    'scale1': torch.stack([data['scale1'] for data in batch_data_select], dim=0).to(device),
                 }
                 batch_dists, batch_idxs = lightglue_matcher.match_batch(batch_preds)
 
             for i in range(len(batch_dists)):
-                #合并多分辨率结果
-                if batch_dists_mr_select[i] is not None:
-                    batch_dists[i] = torch.cat([batch_dists[i],batch_dists_mr_select[i]])
-                    batch_idxs[i] = torch.cat([batch_idxs[i],batch_idxs_mr_select[i]],dim=0)
-                    #对合并的结果进行过滤，nms半径为3
-                    batch_dists[i], batch_idxs[i] = match_nms(batch_dists[i], batch_idxs[i], batch_info[i], features_data, 3)
+                batch_idxs[i] = batch_idxs[i].clone()
+                batch_idxs[i][:,1] = batch_idxs[i][:,1] + (batch_mr_idxs[i]%3) * match_limit
+                #对合并的结果进行过滤，nms半径为3
+                # batch_dists[i], batch_idxs[i] = match_nms(batch_dists[i], batch_idxs[i], batch_info[i], features_data, 3)
             
             # 对 batch_idxs 按照 batch_dists 分数排序并保留最大的 1500 个匹配
             sorted_idxs = []
@@ -3343,7 +3369,7 @@ def match_with_gimlightglue_ensemble_mr(lightglue_matcher, img_fnames, index_pai
                 if verbose:
                     print(f'{key1}-{key2}: {n_matches} matches')
                 
-                if len(idxs) < 700:
+                if len(idxs) < 800:
                     # # 进行第二阶段匹配
                     mkpts1 = features_data[key1]['kp'][idxs[:,0]]
                     mkpts2 = features_data[key2]['kp'][idxs[:,1]]
@@ -4033,7 +4059,7 @@ if is_OneTest:
 else:
     dataset_train_test_lst = [
         'ETs',
-        # 'stairs'
+        'stairs'
         # 'imc2023_heritage'
     ]
     

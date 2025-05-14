@@ -43,6 +43,8 @@ def read_image(path, grayscale=False):
     else:
         mode = cv2.IMREAD_COLOR
     image = cv2.imread(str(path), mode)
+    if grayscale:
+        image = image[:,:,0]
     if image is None:
         raise ValueError(f'Cannot read image {path}.')
     if not grayscale and len(image.shape) == 3:
@@ -67,6 +69,10 @@ def read_image_rot(path, grayscale=False):
 
     # 读取图像
     image = cv2.imread(str(path), mode)
+
+    if grayscale and len(image.shape) == 3:
+        image = image[:,:,0]
+    
     if image is None:
         raise ValueError(f'Cannot read image {path}.')
     if not grayscale and len(image.shape) == 3:
@@ -112,17 +118,21 @@ def read_image_mr(path, grayscale=False):
         scales = [1.0, 1.2, 1.44]
     elif max_dim > 1920:
         # 大图像: 原始、缩小0.8倍、缩小0.65倍
-        scales = [1.0, 0.8, 0.65]
+        scales = [1.0, 0.65, 0.8]
     else:
         # 中等尺寸图像: 原始、放大1.2倍、缩小0.8倍
-        scales = [1.0, 1.2, 0.8]
-
+        scales = [1.0, 0.8, 1.2]
+    # scales = [1.0, 1, 1]
+    if grayscale:
+        image = image[:,:,0]
     # 生成多分辨率图像
     images_mr = []
+    new_scale = []
     for scale in scales:
         if scale == 1.0:
             # 原始尺寸
             images_mr.append(image)
+            new_scale.append(torch.tensor([[1, 1]]))
         else:
             # 计算新尺寸
             new_w = int(round(w * scale))
@@ -131,9 +141,10 @@ def read_image_mr(path, grayscale=False):
             interp = cv2.INTER_LINEAR if scale > 1.0 else cv2.INTER_AREA
             # 调整图像大小
             resized = cv2.resize(image, (new_w, new_h), interpolation=interp)
+            new_scale.append(torch.tensor([[w / new_w, h / new_h]]))
             images_mr.append(resized)
 
-    return images_mr, scales
+    return images_mr, new_scale
 
 def resize_image(image, size, interp):
     assert interp.startswith('cv2_')
@@ -894,10 +905,13 @@ class Lightglue_Matcher():
             pred['descriptors0'] = descriptors
             pred['scores0'] = scores
 
-            #
-            pred['keypoints0'] /= scales_mr[_rot]
+            data['scale0_mr'] = scales_mr[_rot]
+            # pred['keypoints0'] *= scales_mr[_rot]
             # data['scale0'] /= scales_mr[_rot]
             pred['keypoints0'] = torch.cat([kp * s for kp, s in zip(pred['keypoints0'], data['scale0'][:, None])])
+            pred['keypoints0_mr'] = pred['keypoints0']
+            pred['keypoints0'] = torch.cat([kp * s for kp, s in zip(pred['keypoints0'][None], data['scale0_mr'][:, None].to(device))])
+            
             # data['scale0'] *= scales_mr[_rot]
 
             pred_mr.append(pred)
