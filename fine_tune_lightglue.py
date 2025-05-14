@@ -29,7 +29,7 @@ from losses import NLLLoss
 matplotlib.use('Agg')  # 无界面后端，适合在服务器上运行
 
 IMAGE_size = (640, 480)  # 图像大小
-kaggle_run = False
+kaggle_run = True
 
 class AugmentedImagePairDataset(Dataset):
     def __init__(self, image_paths, num_pairs_per_image=5, color_change_prob=0.3):
@@ -538,15 +538,15 @@ def fine_tune_lightglue(lightglue_matcher, images, feature_dir, device, epochs=5
                 best_loss = avg_epoch_loss
                 best_model_state = copy.deepcopy(matcher.state_dict())
                 
-                # 保存检查点
-                checkpoint_path = os.path.join(model_save_dir, f'checkpoint_epoch{epoch+1}.pth')
-                torch.save({
-                    'epoch': epoch + 1,
-                    'model_state_dict': matcher.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'loss': best_loss,
-                }, checkpoint_path)
-                print(f"  保存检查点: {checkpoint_path}")
+                # # 保存检查点
+                # checkpoint_path = os.path.join(model_save_dir, f'checkpoint_epoch{epoch+1}.pth')
+                # torch.save({
+                #     'epoch': epoch + 1,
+                #     'model_state_dict': matcher.state_dict(),
+                #     'optimizer_state_dict': optimizer.state_dict(),
+                #     'loss': best_loss,
+                # }, checkpoint_path)
+                # print(f"  保存检查点: {checkpoint_path}")
         
         # 在每个epoch结束后，可视化评估样本的匹配结果
         if kaggle_run is False:

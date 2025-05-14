@@ -2079,7 +2079,7 @@ def match_with_gimlightglue_batch(lightglue_matcher, img_fnames, index_pairs, fe
     return match_matrix
 
 def match_with_gimlightglue_ensemble(lightglue_matcher, img_fnames, index_pairs, feature_dir='.featureout', 
-                                           device=torch.device('cpu'), min_matches=15, batch_size=2, 
+                                           device=torch.device('cpu'), min_matches=29, batch_size=2, 
                                            tok_limit=1200, match_limit=4096, verbose=True, visualize=True):
     """
     使用批处理方式进行特征匹配，点数不会超过 max_points，但可能小于。
@@ -2312,7 +2312,7 @@ def match_with_gimlightglue_ensemble(lightglue_matcher, img_fnames, index_pairs,
                 if verbose:
                     print(f'{key1}-{key2}: {n_matches} matches')
                 
-                if len(idxs) < 700:
+                if len(idxs) < 800:
                     # # 进行第二阶段匹配
                     mkpts1 = features_data[key1]['kp'][idxs[:,0]]
                     mkpts2 = features_data[key2]['kp'][idxs[:,1]]
@@ -2699,7 +2699,7 @@ def refine_matches(lightglue_matcher, img_fnames, index_pairs, feature_dir='.fea
     # 加载特征数据
     print("加载特征数据...")
     features_data = {}
-    with h5py.File(f'{feature_dir}/keypoints_coarse.h5', mode='r') as f_kp, \
+    with h5py.File(f'{feature_dir}/keypoints.h5', mode='r') as f_kp, \
          h5py.File(f'{feature_dir}/descriptors.h5', mode='r') as f_desc, \
          h5py.File(f'{feature_dir}/size.h5', mode='r') as f_size, \
          h5py.File(f'{feature_dir}/scale.h5', mode='r') as f_scale, \
@@ -2738,80 +2738,84 @@ def refine_matches(lightglue_matcher, img_fnames, index_pairs, feature_dir='.fea
         with tqdm(total=n_total) as pbar:
             for key_1 in match_file.keys():
                 group = match_file[key_1]
+                idx1 = [i for i, x in enumerate(img_fnames) if key_1 in x][0]
                 for key_2 in group.keys():
                     matches = group[key_2][()]
-                    positions = [i for i, x in enumerate(img_fnames) if key_2 in x]
-            # 批量推理
-            with torch.inference_mode():
-                batch_dists, batch_idxs = lightglue_matcher.match_batch(batch_preds)
-                # batch_dists, batch_idxs = lg_forward(lg_matcher, batch_preds_alike['descriptors0'].float(), batch_preds_alike['descriptors1'].float(),
-                #         KF.laf_from_center_scale_ori(batch_preds_alike['keypoints0'].float()),
-                #         KF.laf_from_center_scale_ori(batch_preds_alike['keypoints1'].float()))
-                # batch_idxs += 4096
+                    idx2 = [i for i, x in enumerate(img_fnames) if key_2 in x][0]
+                    match_matrix[idx1, idx2] = len(matches)
+                    match_matrix[idx2, idx1] = len(matches)
+        print("匹配矩阵:", match_matrix)
+            # # 批量推理
+            # with torch.inference_mode():
+            #     batch_dists, batch_idxs = lightglue_matcher.match_batch(batch_preds)
+            #     # batch_dists, batch_idxs = lg_forward(lg_matcher, batch_preds_alike['descriptors0'].float(), batch_preds_alike['descriptors1'].float(),
+            #     #         KF.laf_from_center_scale_ori(batch_preds_alike['keypoints0'].float()),
+            #     #         KF.laf_from_center_scale_ori(batch_preds_alike['keypoints1'].float()))
+            #     # batch_idxs += 4096
                 
-            # 对 batch_idxs 按照 batch_dists 分数排序并保留最大的 1500 个匹配
-            sorted_idxs = []
-            for i in range(len(batch_dists)):
-                if len(batch_dists[i]) > 0:
-                    dists = batch_dists[i]
-                    idxs = batch_idxs[i]
-                    sorted_indices = torch.argsort(dists, descending=True)
-                    sorted_dists = dists[sorted_indices]
-                    sorted_idxs_batch = idxs[sorted_indices]
-                    top_k = min(tok_limit, len(sorted_dists))
-                    sorted_idxs.append(sorted_idxs_batch[:top_k])
-                else:
-                    sorted_idxs.append([])
+            # # 对 batch_idxs 按照 batch_dists 分数排序并保留最大的 1500 个匹配
+            # sorted_idxs = []
+            # for i in range(len(batch_dists)):
+            #     if len(batch_dists[i]) > 0:
+            #         dists = batch_dists[i]
+            #         idxs = batch_idxs[i]
+            #         sorted_indices = torch.argsort(dists, descending=True)
+            #         sorted_dists = dists[sorted_indices]
+            #         sorted_idxs_batch = idxs[sorted_indices]
+            #         top_k = min(tok_limit, len(sorted_dists))
+            #         sorted_idxs.append(sorted_idxs_batch[:top_k])
+            #     else:
+            #         sorted_idxs.append([])
 
-            batch_idxs = sorted_idxs   
-            # 处理结果
-            for i, (idx1, idx2, key1, key2, fname1, fname2) in enumerate(batch_info):
-                if i >= len(batch_idxs) or batch_idxs[i] is None or len(batch_idxs[i]) == 0:
-                    continue
+            # batch_idxs = sorted_idxs   
+            # # 处理结果
+            # for i, (idx1, idx2, key1, key2, fname1, fname2) in enumerate(batch_info):
+            #     if i >= len(batch_idxs) or batch_idxs[i] is None or len(batch_idxs[i]) == 0:
+            #         continue
                 
-                idxs = batch_idxs[i]
+            #     idxs = batch_idxs[i]
                 
-                if verbose:
-                    print(f'{key1}-{key2}: {n_matches} matches')
+            #     if verbose:
+            #         print(f'{key1}-{key2}: {n_matches} matches')
                 
-                if len(idxs) < 700:
-                    # # 进行第二阶段匹配
-                    mkpts1 = features_data[key1]['kp'][idxs[:,0]]
-                    mkpts2 = features_data[key2]['kp'][idxs[:,1]]
-                    # 进行第二阶段匹配
-                    region_idxs = second_match_ensemble(mkpts1.cpu().numpy(), mkpts2.cpu().numpy(), idxs, features_data, key1, key2, lg_matcher)
-                    print(f'{key1}-{key2}')
-                    print("region_dists:", len(idxs), len(region_idxs))
-                    idxs = region_idxs
-                n_matches = len(idxs)
-                # 保存匹配结果
-                if n_matches >= min_matches:
-                    # kpts0 = features_data[key1]['kp'][idxs[:,0]]
-                    # kpts1 = features_data[key2]['kp'][idxs[:,1]]
-                    # # robust fitting
-                    # _, mask = cv2.findFundamentalMat(kpts0.cpu().detach().numpy(),
-                    #                                 kpts1.cpu().detach().numpy(),
-                    #                                 cv2.USAC_MAGSAC, ransacReprojThreshold=1.0,
-                    #                                 confidence=0.999999, maxIters=10000)
-                    # mask = mask.ravel() > 0
-                    # idxs = idxs[mask]
-                    if len(idxs) >= min_matches:
-                        group = f_match.require_group(key1)
-                        group.create_dataset(key2, data=idxs.detach().cpu().numpy().reshape(-1, 2))
-                        match_matrix[idx1, idx2] = n_matches
+            #     if len(idxs) < 700:
+            #         # # 进行第二阶段匹配
+            #         mkpts1 = features_data[key1]['kp'][idxs[:,0]]
+            #         mkpts2 = features_data[key2]['kp'][idxs[:,1]]
+            #         # 进行第二阶段匹配
+            #         region_idxs = second_match_ensemble(mkpts1.cpu().numpy(), mkpts2.cpu().numpy(), idxs, features_data, key1, key2, lg_matcher)
+            #         print(f'{key1}-{key2}')
+            #         print("region_dists:", len(idxs), len(region_idxs))
+            #         idxs = region_idxs
+            #     n_matches = len(idxs)
+            #     # 保存匹配结果
+            #     if n_matches >= min_matches:
+            #         # kpts0 = features_data[key1]['kp'][idxs[:,0]]
+            #         # kpts1 = features_data[key2]['kp'][idxs[:,1]]
+            #         # # robust fitting
+            #         # _, mask = cv2.findFundamentalMat(kpts0.cpu().detach().numpy(),
+            #         #                                 kpts1.cpu().detach().numpy(),
+            #         #                                 cv2.USAC_MAGSAC, ransacReprojThreshold=1.0,
+            #         #                                 confidence=0.999999, maxIters=10000)
+            #         # mask = mask.ravel() > 0
+            #         # idxs = idxs[mask]
+            #         if len(idxs) >= min_matches:
+            #             group = f_match.require_group(key1)
+            #             group.create_dataset(key2, data=idxs.detach().cpu().numpy().reshape(-1, 2))
+            #             match_matrix[idx1, idx2] = n_matches
                         
-                        # 可视化匹配
-                        if visualize:
-                            vis_dir = os.path.join(feature_dir, 'visualizations')
-                            os.makedirs(vis_dir, exist_ok=True)
-                            save_path = os.path.join(vis_dir, f'{key1}_{key2}_matches.png')
-                            visualize_matches(
-                                fname1, fname2,
-                                features_data[key1]['kp'].cpu().numpy(),
-                                features_data[key2]['kp'].cpu().numpy(),
-                                idxs.cpu().numpy(),
-                                save_path
-                            )
+            #             # 可视化匹配
+            #             if visualize:
+            #                 vis_dir = os.path.join(feature_dir, 'visualizations')
+            #                 os.makedirs(vis_dir, exist_ok=True)
+            #                 save_path = os.path.join(vis_dir, f'{key1}_{key2}_matches.png')
+            #                 visualize_matches(
+            #                     fname1, fname2,
+            #                     features_data[key1]['kp'].cpu().numpy(),
+            #                     features_data[key2]['kp'].cpu().numpy(),
+            #                     idxs.cpu().numpy(),
+            #                     save_path
+            #                 )
 
     return match_matrix
 
@@ -4066,8 +4070,8 @@ if is_OneTest:
     ]
 else:
     dataset_train_test_lst = [
-        'ETs',
-        # 'stairs'
+        # 'ETs',
+        'stairs'
         # 'imc2023_heritage'
     ]
     
@@ -4120,8 +4124,8 @@ for dataset, predictions in samples.items():
     # print(f'person_mask in {time() - t:.4f} sec')
 
     t = time()
-    detect_aliked(images, feature_dir, 4096, device=device)
-    # detect_sp_ensemble_rot(lightglue_matcher, images, feature_dir, 4096, device=device)
+    # detect_aliked(images, feature_dir, 4096, device=device)
+    detect_sp_ensemble(lightglue_matcher, images, feature_dir, 4096, device=device)
     timings['feature_detection'].append(time() - t)
     print(f'Features detected in {time() - t:.4f} sec')
 
@@ -4131,29 +4135,29 @@ for dataset, predictions in samples.items():
     # timings['feature_detection'].append(time() - t)
     # print(f'Features detected in {time() - t:.4f} sec')
         
-    t = time()
-    match_with_lightglue(images, index_pairs, feature_dir=feature_dir, device=device, verbose=False)
-    timings['feature_matching'].append(time() - t)
-    print(f'Features matched in {time() - t:.4f} sec')
-
-    # # 3. 微调LightGlue
     # t = time()
-    # fine_tuned_matcher = fine_tune_lightglue(
-    #     lightglue_matcher,
-    #     images, 
-    #     feature_dir, 
-    #     device,
-    #     batch_size=8,
-    #     epochs=5
-    # )
-    # lightglue_matcher.update_model(fine_tuned_matcher)
-    # print(f'模型微调完成，耗时 {time() - t:.4f} sec')
+    # match_with_lightglue(images, index_pairs, feature_dir=feature_dir, device=device, verbose=False)
+    # timings['feature_matching'].append(time() - t)
+    # print(f'Features matched in {time() - t:.4f} sec')
+
+    # 3. 微调LightGlue
+    t = time()
+    fine_tuned_matcher = fine_tune_lightglue(
+        lightglue_matcher,
+        images, 
+        feature_dir, 
+        device,
+        batch_size=8,
+        epochs=5
+    )
+    lightglue_matcher.update_model(fine_tuned_matcher)
+    print(f'模型微调完成，耗时 {time() - t:.4f} sec')
     
 
     # t = time()
     # # match_matrix = match_with_gimloftr(lightglue_matcher, images, index_pairs, feature_dir=feature_dir, device=device, verbose=False)
-    # match_matrix = match_with_gimlightglue_ensemble_rot(lightglue_matcher, images, index_pairs, feature_dir=feature_dir, device=device, verbose=False)
-    # # match_matrix = refine_matches(lightglue_matcher, images, index_pairs, feature_dir=feature_dir, device=device, verbose=False)
+    match_matrix = match_with_gimlightglue_ensemble(lightglue_matcher, images, index_pairs, feature_dir=feature_dir, device=device, verbose=False)
+    # match_matrix = refine_matches(lightglue_matcher, images, index_pairs, feature_dir=feature_dir, device=device, verbose=False)
     # timings['feature_matching'].append(time() - t)
     # print(f'Features matched in {time() - t:.4f} sec')
     # print('match_matrix', match_matrix.sum())
