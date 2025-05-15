@@ -28,14 +28,15 @@ import matplotlib
 from losses import NLLLoss
 matplotlib.use('Agg')  # 无界面后端，适合在服务器上运行
 
-IMAGE_size = (640, 480)  # 图像大小
-kaggle_run = True
+IMAGE_SIZE = (800,800)
+kaggle_run = False
 
 class AugmentedImagePairDataset(Dataset):
-    def __init__(self, image_paths, num_pairs_per_image=5, color_change_prob=0.3):
+    def __init__(self, image_paths, num_pairs_per_image=5, color_change_prob=0.3, copy_paste_prob=0.8):
         self.image_paths = image_paths
         self.num_pairs_per_image = num_pairs_per_image
         self.color_change_prob = color_change_prob
+        self.copy_paste_prob = copy_paste_prob  # 新增复制粘贴概率参数
         
         # 基础变换
         self.color_jitter = K.ColorJitter(0.3, 0.3, 0.3, 0.1, p=0)
@@ -63,6 +64,127 @@ class AugmentedImagePairDataset(Dataset):
         img[:, :, y:y+mask_size[1], x:x+mask_size[0]] = changed_region
         
         return img, mask
+
+    def apply_copy_paste(self, img, original_path, mask_size=(400, 400)):
+        """
+        在图像中随机选择一块区域，复制并应用变换后粘贴到另一位置
+        考虑图像的有效区域大小，根据原始图像尺寸调整复制区域大小
+        
+        Args:
+            img: 输入图像张量
+            mask_size: 默认掩码大小
+            original_path: 原始图像路径，用于获取原始尺寸
+        
+        Returns:
+            修改后的图像，源区域掩码，目标区域掩码
+        """
+        H, W = img.shape[-2:]
+        
+        # 获取原始图像的有效区域
+        effective_area = None
+        
+        if original_path is not None:
+            try:
+                # 打开原始图像获取尺寸
+                original_img = Image.open(original_path)
+                orig_width, orig_height = original_img.size
+                
+                # 计算有效区域占总区域的比例
+                area_ratio = (orig_width * orig_height) / (H * W)
+                
+                # 如果原始图像小于目标尺寸，调整复制区域大小
+                if area_ratio < 0.8:  # 如果有效区域小于总区域的80%
+                    # 根据有效区域比例缩小复制区域
+                    adjusted_mask_w = int(mask_size[0] * min(1.0, (orig_width / W) * 1.5))
+                    adjusted_mask_h = int(mask_size[1] * min(1.0, (orig_height / H) * 1.5))
+                    
+                    # 确保区域不会太小
+                    mask_w = max(50, min(adjusted_mask_w, W // 3))
+                    mask_h = max(50, min(adjusted_mask_h, H // 3))
+                    
+                    # 如果有效区域太小，使复制区域更小
+                    if area_ratio < 0.5:
+                        mask_w = min(mask_w, W // 4)
+                        mask_h = min(mask_h, H // 4)
+                    
+                    # 调整复制区域的最大范围为有效区域内
+                    effective_area = (
+                        max(0, (W - orig_width) // 2),
+                        max(0, (H - orig_height) // 2),
+                        min(W, (W + orig_width) // 2),
+                        min(H, (H + orig_height) // 2)
+                    )
+                else:
+                    # 原始图像接近目标尺寸，使用标准设置
+                    mask_w = min(mask_size[0], W // 3)
+                    mask_h = min(mask_size[1], H // 3)
+            except Exception as e:
+                # 如果出现问题，回退到默认值
+                mask_w = min(mask_size[0], W // 3)
+                mask_h = min(mask_size[1], H // 3)
+        else:
+            # 没有提供原始路径，使用默认值
+            mask_w = min(mask_size[0], W // 3)
+            mask_h = min(mask_size[1], H // 3)
+        
+        # 确定源区域位置（考虑有效区域）
+        if effective_area is not None:
+            x_min, y_min, x_max, y_max = effective_area
+            src_x = random.randint(x_min, max(x_min, x_max - mask_w))
+            src_y = random.randint(y_min, max(y_min, y_max - mask_h))
+        else:
+            src_x = random.randint(0, W - mask_w)
+            src_y = random.randint(0, H - mask_h)
+        
+        # 确定目标区域位置（也考虑有效区域）
+        if effective_area is not None:
+            x_min, y_min, x_max, y_max = effective_area
+            dst_x = random.randint(x_min, max(x_min, x_max - mask_w))
+            dst_y = random.randint(y_min, max(y_min, y_max - mask_h))
+        else:
+            dst_x = random.randint(0, W - mask_w)
+            dst_y = random.randint(0, H - mask_h)
+        
+        # 创建源区域和目标区域掩码
+        src_mask = torch.zeros((1, H, W), device=img.device)
+        dst_mask = torch.zeros((1, H, W), device=img.device)
+        
+        src_mask[:, src_y:src_y+mask_h, src_x:src_x+mask_w] = 1.0
+        dst_mask[:, dst_y:dst_y+mask_h, dst_x:dst_x+mask_w] = 1.0
+        
+        # 复制源区域并应用变换
+        img_clone = img.clone()
+        copied_region = img[:, :, src_y:src_y+mask_h, src_x:src_x+mask_w].clone()
+        
+        # 对复制区域应用随机变换以增加差异性（代码保持不变）
+        if random.random() > 0.5:
+            angle = random.choice([90, 180, 270])
+            if angle == 90:
+                copied_region = copied_region.flip(3).transpose(2, 3)
+            elif angle == 180:
+                copied_region = copied_region.flip(2).flip(3)
+            elif angle == 270:
+                copied_region = copied_region.flip(2).transpose(2, 3)
+        
+        if random.random() > 0.5:
+            brightness_factor = random.uniform(0.8, 1.2)
+            copied_region = copied_region * brightness_factor
+            copied_region = torch.clamp(copied_region, 0, 1)
+        
+        # 粘贴到目标区域（代码保持不变）
+        try:
+            c_h, c_w = copied_region.shape[2], copied_region.shape[3]
+            d_h, d_w = min(c_h, mask_h), min(c_w, mask_w)
+            
+            img_clone[:, :, dst_y:dst_y+d_h, dst_x:dst_x+d_w] = copied_region[:, :, :d_h, :d_w]
+            
+            dst_mask = torch.zeros((1, H, W), device=img.device)
+            dst_mask[:, dst_y:dst_y+d_h, dst_x:dst_x+d_w] = 1.0
+        except Exception as e:
+            img_clone[:, :, dst_y:dst_y+mask_h, dst_x:dst_x+mask_w] = copied_region
+        
+        return img_clone, src_mask, dst_mask
+        
     def __len__(self):
         return len(self.image_paths) * self.num_pairs_per_image
     
@@ -85,13 +207,22 @@ class AugmentedImagePairDataset(Dataset):
             img1_batch = self.blur(img1_batch)
             img2_batch = self.blur(img2_batch)
             
-            # 随机决定是否应用区域颜色变换
+            # 初始化变换标志和掩码
             apply_color_change = random.random() < self.color_change_prob
-            # 初始化为空tensor而不是None
-            color_change_mask = torch.zeros((1, img2_batch.shape[2], img2_batch.shape[3]))
+            apply_copy_paste = random.random() < self.copy_paste_prob
             
+            # 初始化为空tensor
+            color_change_mask = torch.zeros((1, img2_batch.shape[2], img2_batch.shape[3]))
+            src_copy_mask = torch.zeros((1, img2_batch.shape[2], img2_batch.shape[3]))
+            dst_copy_mask = torch.zeros((1, img2_batch.shape[2], img2_batch.shape[3]))
+            
+            # 随机应用区域颜色变换
             if apply_color_change:
                 img2_batch, color_change_mask = self.apply_regional_color_change(img2_batch)
+            
+            # 随机应用复制粘贴变换
+            if apply_copy_paste and not apply_color_change:  # 避免同时应用两种变换
+                img2_batch, src_copy_mask, dst_copy_mask = self.apply_copy_paste(img2_batch, original_path=img_path)  # 传递原始图像路径
             
             # 几何变换
             H, W = img1_batch.shape[-2:]
@@ -117,15 +248,83 @@ class AugmentedImagePairDataset(Dataset):
             'pair_idx': idx % self.num_pairs_per_image,
             'transform0': affine1_matrix.squeeze(0),
             'transform1': perspective_matrix.squeeze(0),
-            'color_change_applied': apply_color_change,  # 添加颜色变换标志
-            'color_change_mask': color_change_mask  # 添加颜色变换mask
+            'color_change_applied': apply_color_change,
+            'color_change_mask': color_change_mask,
+            'copy_paste_applied': apply_copy_paste,
+            'src_copy_mask': src_copy_mask,
+            'dst_copy_mask': dst_copy_mask
         }
 
-def load_torch_image(image_path, resize_size=IMAGE_size):
-    """加载图像为torch张量"""
+def load_torch_image(image_path, target_size=IMAGE_SIZE):
+    """
+    加载图像为torch张量，使用以下策略处理图像尺寸：
+    - 大于目标尺寸的图像：随机裁剪
+    - 小于目标尺寸的图像：等比例缩放（保持长宽比），然后在随机位置填充0
+    
+    Args:
+        image_path: 图像文件路径
+        target_size: 目标图像尺寸 (width, height)
+        
+    Returns:
+        torch.Tensor: 加载的图像张量，尺寸为target_size
+    """
+    # 加载原始图像
     img = Image.open(image_path).convert('RGB')
+    
+    # 获取原始尺寸
+    orig_width, orig_height = img.size
+    
+    # 目标尺寸
+    target_width, target_height = target_size
+    
+    # 随机决定使用裁剪还是缩放（只有当图像足够大时才能裁剪）
+    can_crop = orig_width >= target_width and orig_height >= target_height
+    use_crop = can_crop and random.random() > 0.5
+    
+    if use_crop:
+        # 随机裁剪
+        max_x = orig_width - target_width
+        max_y = orig_height - target_height
+        
+        x = random.randint(0, max_x)
+        y = random.randint(0, max_y)
+        
+        img = img.crop((x, y, x + target_width, y + target_height))
+    else:
+        # 等比例缩放，保持长宽比
+        # 计算缩放比例
+        width_ratio = target_width / orig_width
+        height_ratio = target_height / orig_height
+        
+        # 使用较小的比例进行缩放，确保图像完全在目标尺寸内
+        ratio = min(width_ratio, height_ratio)
+        
+        # 计算缩放后的尺寸
+        new_width = int(orig_width * ratio)
+        new_height = int(orig_height * ratio)
+        
+        # 调整大小，保持长宽比
+        img_resized = img.resize((new_width, new_height), Image.LANCZOS)
+        
+        # 创建黑色背景
+        padded_img = Image.new('RGB', (target_width, target_height), (0, 0, 0))
+        
+        # 计算可能的粘贴位置范围
+        paste_x_max = max(0, target_width - new_width)
+        paste_y_max = max(0, target_height - new_height)
+        
+        # 随机选择粘贴位置
+        paste_x = random.randint(0, paste_x_max) if paste_x_max > 0 else 0
+        paste_y = random.randint(0, paste_y_max) if paste_y_max > 0 else 0
+        
+        # 粘贴调整大小后的图像到随机位置
+        padded_img.paste(img_resized, (paste_x, paste_y))
+        
+        img = padded_img
+    
+    # 转换为torch张量
     img_tensor = TF.to_tensor(img)
-    img_tensor = TF.resize(img_tensor, resize_size, antialias=True)
+    
     return img_tensor
 
 def get_loss(model, pred, data):
@@ -185,7 +384,7 @@ def get_gt(data, batch_size, device, distance_threshold=1):
         keypoints1 = data['keypoints1'][b]
         N0, N1 = keypoints0.shape[0], keypoints1.shape[0]
         
-        # 如果应用了颜色变换，检查关键点是否在变换区域内
+        # 检查是否应用了颜色变换，将对应区域的匹配点标记为不匹配
         if data.get('color_change_applied', False) and data.get('color_change_mask') is not None:
             color_mask = data['color_change_mask'][b]
             # 检查keypoints1是否在颜色变换区域内
@@ -196,6 +395,27 @@ def get_gt(data, batch_size, device, distance_threshold=1):
                 if kpts_in_changed_region[j]:
                     match_matrix[b, N0, j] = 1.0  # 设置为不匹配
                     continue
+        
+        # 检查是否应用了复制粘贴变换，将源区域和目标区域的匹配点标记为不匹配
+        if data.get('copy_paste_applied', False):
+            src_mask = data['src_copy_mask'][b]
+            dst_mask = data['dst_copy_mask'][b]
+            
+            # 检查keypoints0是否在源区域内
+            kpts0_in_src = src_mask[:, keypoints0[:, 1].long(), keypoints0[:, 0].long()].bool()
+            
+            # 检查keypoints1是否在源区域或目标区域内
+            kpts1_in_src = src_mask[:, keypoints1[:, 1].long(), keypoints1[:, 0].long()].bool()
+            kpts1_in_dst = dst_mask[:, keypoints1[:, 1].long(), keypoints1[:, 0].long()].bool()
+            
+            # 将源区域和目标区域内的点标记为不匹配
+            for i in range(N0):
+                if kpts0_in_src[i]:
+                    match_matrix[b, i, N1] = 1.0  # 设置为不匹配
+            
+            for j in range(N1):
+                if kpts1_in_src[j] or kpts1_in_dst[j]:
+                    match_matrix[b, N0, j] = 1.0  # 设置为不匹配
         
         # 计算正常区域的匹配
         transform0_inv = torch.inverse(data['transform0'][b].to(device, dtype=keypoints0.dtype))
@@ -212,16 +432,35 @@ def get_gt(data, batch_size, device, distance_threshold=1):
         min_dists, min_indices = dist_matrix.min(dim=1)
         valid_matches = min_dists < distance_threshold
         
-        # 设置匹配对
+        # 设置匹配对，但排除已经被标记为不匹配的点
         for i in range(N0):
+            # 如果keypoint0在源复制区域内，跳过，因为已经被标记为不匹配
+            if data.get('copy_paste_applied', False) and 'src_copy_mask' in data:
+                if data['src_copy_mask'][b][:, keypoints0[i, 1].long(), keypoints0[i, 0].long()].bool():
+                    continue
+                    
             if valid_matches[i]:
                 j = min_indices[i]
-                # 如果匹配点在颜色变换区域内，则视为不匹配
+                
+                # 检查keypoint1是否在变换区域内
+                in_color_change_region = False
+                in_copy_paste_region = False
+                
                 if data.get('color_change_applied', False) and data.get('color_change_mask') is not None:
-                    if color_mask[:, keypoints1[j, 1].long(), keypoints1[j, 0].long()].bool():
-                        match_matrix[b, i, N1] = 1.0  # 不匹配
-                        continue
-                match_matrix[b, i, j] = 1.0  # 正常匹配
+                    if data['color_change_mask'][b][:, keypoints1[j, 1].long(), keypoints1[j, 0].long()].bool():
+                        in_color_change_region = True
+                
+                if data.get('copy_paste_applied', False):
+                    if data['src_copy_mask'][b][:, keypoints1[j, 1].long(), keypoints1[j, 0].long()].bool():
+                        in_copy_paste_region = True
+                    if data['dst_copy_mask'][b][:, keypoints1[j, 1].long(), keypoints1[j, 0].long()].bool():
+                        in_copy_paste_region = True
+                
+                # 如果不在任何特殊区域内，则设置为匹配
+                if not in_color_change_region and not in_copy_paste_region:
+                    match_matrix[b, i, j] = 1.0  # 正常匹配
+                else:
+                    match_matrix[b, i, N1] = 1.0  # 不匹配
             else:
                 match_matrix[b, i, N1] = 1.0  # 不匹配
     
@@ -447,22 +686,17 @@ def fine_tune_lightglue(lightglue_matcher, images, feature_dir, device, epochs=5
             
             # 获取批量图像尺寸
             batch_size = imgs0.shape[0]
-            img_sizes0 = IMAGE_size
-            img_sizes1 = IMAGE_size
-            
             
             # 使用半精度提取特征
             with torch.no_grad(), autocast():
                 # 批量特征提取
                 feats0 = extractor({
                     "image": imgs0,
-                    "image_size": img_sizes0,
                     "max_kps":2048
                 })
                 
                 feats1 = extractor({
                     "image": imgs1,
-                    "image_size": img_sizes1,
                     "max_kps":512
                 })
             

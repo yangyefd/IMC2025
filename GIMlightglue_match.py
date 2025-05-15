@@ -530,7 +530,7 @@ class Lightglue_Matcher():
             'trainable': False,
         })
         model = LightGlue({
-            'filter_threshold': 0.1,
+            'filter_threshold': 0.1, # 0.1
             'flash': False,
             'checkpointed': True,
         })
