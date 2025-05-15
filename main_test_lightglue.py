@@ -4310,7 +4310,7 @@ for dataset, predictions in samples.items():
     feature_dir = os.path.join(workdir, 'featureout', dataset)
     os.makedirs(feature_dir, exist_ok=True)
 
-    if 0:
+    if 1:
         # try:
         t = time()
         # index_pairs = get_image_pairs_shortlist(images, sim_th=0.3, min_pairs=20, 
@@ -4357,18 +4357,18 @@ for dataset, predictions in samples.items():
         # timings['feature_matching'].append(time() - t)
         # print(f'Features matched in {time() - t:.4f} sec')
 
-        # 3. 微调LightGlue
-        t = time()
-        fine_tuned_matcher = fine_tune_lightglue(
-            lightglue_matcher,
-            images, 
-            feature_dir, 
-            device,
-            batch_size=8,
-            epochs=2
-        )
-        lightglue_matcher.update_model(fine_tuned_matcher)
-        print(f'模型微调完成，耗时 {time() - t:.4f} sec')
+        # # 3. 微调LightGlue
+        # t = time()
+        # fine_tuned_matcher = fine_tune_lightglue(
+        #     lightglue_matcher,
+        #     images, 
+        #     feature_dir, 
+        #     device,
+        #     batch_size=8,
+        #     epochs=2
+        # )
+        # lightglue_matcher.update_model(fine_tuned_matcher)
+        # print(f'模型微调完成，耗时 {time() - t:.4f} sec')
         
 
         t = time()
@@ -4402,7 +4402,7 @@ for dataset, predictions in samples.items():
         filtered_matches_dict = filter_matches_graph(images, matches_dict, features_data)
 
         # # 可视化过滤结果
-        # visualize_filtered_matches(images, matches_dict, filtered_matches_dict, features_data, os.path.join(feature_dir, 'graph_results'))
+        visualize_filtered_matches(images, matches_dict, filtered_matches_dict, features_data, os.path.join(feature_dir, 'graph_results'))
         
         import shutil
         # 备份原始 matches.h5 文件（如果存在）

@@ -29,7 +29,7 @@ from losses import NLLLoss
 matplotlib.use('Agg')  # 无界面后端，适合在服务器上运行
 
 IMAGE_SIZE = (800,800)
-kaggle_run = False
+kaggle_run = True
 
 class AugmentedImagePairDataset(Dataset):
     def __init__(self, image_paths, num_pairs_per_image=5, color_change_prob=0.3, copy_paste_prob=0.8):

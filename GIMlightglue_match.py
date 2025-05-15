@@ -43,7 +43,7 @@ def read_image(path, grayscale=False):
     else:
         mode = cv2.IMREAD_COLOR
     image = cv2.imread(str(path), mode)
-    if grayscale:
+    if grayscale and len(image.shape) == 3:
         image = image[:,:,0]
     if image is None:
         raise ValueError(f'Cannot read image {path}.')
