@@ -124,7 +124,287 @@ def visualize_filtered_matches(frames, original_matches_dict, filtered_matches_d
         cv2.imwrite(output_path, vis)
         print(f"保存可视化结果至: {output_path}")
 
-def filter_matches_graph(frames, matches_dict, features_data_t, threshold=0.6, distance_threshold=10.0, inlier_ratio_threshold=0.8, verbose=True):
+def visualize_connections(key_center, filtered_matches_dict, features_data, frames, output_dir=None):
+    """
+    可视化以指定图像为中心的匹配连接关系
+    
+    Args:
+        key_center: 中心图像的关键字
+        filtered_matches_dict: 过滤后的匹配字典 {key1-key2: matches}
+        features_data: 特征数据字典
+        frames: 图像路径列表
+        output_dir: 输出目录，默认为None时创建在当前目录
+        
+    Returns:
+        None (保存或显示图像)
+    """
+    import networkx as nx
+    import matplotlib.pyplot as plt
+    import matplotlib.image as mpimg
+    import numpy as np
+    import os
+    from PIL import Image
+    import cv2
+    
+    if output_dir is None:
+        output_dir = "connection_viz"
+    
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    
+    # 构建连接图
+    G = nx.Graph()
+    
+    # 添加节点
+    connected_keys = set()
+    connected_keys.add(key_center)
+    
+    # 寻找与中心图像相连的所有图像
+    for key_pair, matches in filtered_matches_dict.items():
+        key1, key2 = key_pair.split('-')
+        
+        if key1 == key_center:
+            connected_keys.add(key2)
+            match_count = len(matches)
+            G.add_edge(key1, key2, weight=match_count)
+        elif key2 == key_center:
+            connected_keys.add(key1)
+            match_count = len(matches)
+            G.add_edge(key2, key1, weight=match_count)
+    
+    # 如果没有连接，则返回
+    if len(connected_keys) <= 1:
+        print(f"图像 {key_center} 没有匹配关系")
+        return
+    
+    # 找出所有图像之间的连接关系
+    for key_pair, matches in filtered_matches_dict.items():
+        key1, key2 = key_pair.split('-')
+        if key1 in connected_keys and key2 in connected_keys:
+            match_count = len(matches)
+            G.add_edge(key1, key2, weight=match_count)
+    
+    # 为图像节点添加位置和缩略图
+    node_images = {}
+    positions = {}
+    
+    # 获取中心图像并调整大小
+    center_img_path = None
+    for frame in frames:
+        if key_center in frame:
+            center_img_path = frame
+            break
+    
+    if center_img_path:
+        center_img = Image.open(center_img_path)
+        # 确保中心图像不会太大
+        center_img.thumbnail((100, 100))
+        node_images[key_center] = np.array(center_img)
+        positions[key_center] = (0, 0)  # 中心位置
+    
+    # 计算其他节点的位置和图像
+    num_connected = len(connected_keys) - 1
+    radius = 300  # 圆的半径
+    angle_step = 2 * np.pi / num_connected
+    
+    i = 0
+    for key in connected_keys:
+        if key == key_center:
+            continue
+        
+        angle = i * angle_step
+        x = radius * np.cos(angle)
+        y = radius * np.sin(angle)
+        positions[key] = (x, y)
+        
+        # 获取图像路径
+        img_path = None
+        for frame in frames:
+            if key in frame:
+                img_path = frame
+                break
+        
+        if img_path:
+            img = Image.open(img_path)
+            img.thumbnail((80, 80))  # 连接节点图像稍小
+            node_images[key] = np.array(img)
+        
+        i += 1
+    
+    # 创建图形
+    plt.figure(figsize=(14, 10))
+    
+    # 绘制边（带宽度）
+    for u, v, data in G.edges(data=True):
+        weight = data['weight']
+        max_weight = max([d['weight'] for _, _, d in G.edges(data=True)])
+        width = 1 + 10 * weight / max_weight  # 根据权重归一化线宽
+        
+        # 连接图
+        x1, y1 = positions[u]
+        x2, y2 = positions[v]
+        
+        # 绘制连接线，宽度表示匹配点数量
+        plt.plot([x1, x2], [y1, y2], 'k-', alpha=0.5, linewidth=width)
+        
+        # 在连接线上显示匹配点数量
+        mid_x = (x1 + x2) / 2
+        mid_y = (y1 + y2) / 2
+        plt.text(mid_x, mid_y, str(weight), fontsize=9, 
+                 bbox=dict(facecolor='white', alpha=0.7, edgecolor='none'))
+    
+    # 绘制节点与图像
+    for key, (x, y) in positions.items():
+        # 在节点位置显示图像
+        if key in node_images:
+            img = node_images[key]
+            img_height, img_width = img.shape[:2]
+            
+            # 创建图像显示区域
+            image_box = plt.Rectangle((x - img_width/2, y - img_height/2), 
+                                      img_width, img_height, 
+                                      fill=False, edgecolor='gray')
+            plt.gca().add_patch(image_box)
+            
+            # 显示图像
+            plt.imshow(img, extent=(x - img_width/2, x + img_width/2, 
+                                    y - img_height/2, y + img_height/2))
+        
+        # 图像下方显示图像名称
+        plt.text(x, y - 50, key, ha='center', fontsize=10,
+                 bbox=dict(facecolor='white', alpha=0.7))
+        
+        # 如果是中心节点，添加额外标记
+        if key == key_center:
+            circle = plt.Circle((x, y), 110, fill=False, edgecolor='red', linewidth=2)
+            plt.gca().add_patch(circle)
+    
+    # 设置坐标轴
+    plt.xlim(min([p[0] for p in positions.values()]) - 200, 
+             max([p[0] for p in positions.values()]) + 200)
+    plt.ylim(min([p[1] for p in positions.values()]) - 200, 
+             max([p[1] for p in positions.values()]) + 200)
+    
+    # 设置标题
+    plt.title(f'图像 {key_center} 的匹配连接关系')
+    plt.axis('off')  # 隐藏坐标轴
+    
+    # 添加图例
+    plt.figtext(0.02, 0.02, "连接线宽度表示匹配点数量", fontsize=10)
+    
+    # 保存图像
+    output_path = os.path.join(output_dir, f"{key_center}_connections.png")
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    print(f"连接关系图已保存至: {output_path}")
+    
+    # 创建一个饼图展示匹配点数量分布
+    match_counts = {}
+    total_matches = 0
+    
+    for u, v, data in G.edges(data=True):
+        if u == key_center:
+            match_counts[v] = data['weight']
+            total_matches += data['weight']
+        elif v == key_center:
+            match_counts[u] = data['weight']
+            total_matches += data['weight']
+    
+    if match_counts:
+        plt.figure(figsize=(10, 6))
+        labels = [f"{key} ({count})" for key, count in match_counts.items()]
+        sizes = [count for count in match_counts.values()]
+        
+        plt.pie(sizes, labels=labels, autopct='%1.1f%%', startangle=90)
+        plt.title(f'{key_center} 匹配点分布 (总计: {total_matches})')
+        
+        # 保存饼图
+        pie_path = os.path.join(output_dir, f"{key_center}_match_distribution.png")
+        plt.savefig(pie_path, dpi=300, bbox_inches='tight')
+        print(f"匹配点分布图已保存至: {pie_path}")
+    
+    # 为连接的图像对创建匹配可视化缩略图
+    for key in connected_keys:
+        if key == key_center:
+            continue
+        
+        key_pair = f"{key_center}-{key}"
+        reverse_key_pair = f"{key}-{key_center}"
+        
+        if key_pair in filtered_matches_dict:
+            matches = filtered_matches_dict[key_pair]
+        elif reverse_key_pair in filtered_matches_dict:
+            matches = filtered_matches_dict[reverse_key_pair]
+        else:
+            continue
+        
+        # 找到对应的图像路径
+        img1_path = None
+        img2_path = None
+        
+        for frame in frames:
+            if key_center in frame:
+                img1_path = frame
+            if key in frame:
+                img2_path = frame
+        
+        if img1_path is None or img2_path is None:
+            continue
+        
+        # 读取图像
+        img1 = cv2.imread(img1_path)
+        img2 = cv2.imread(img2_path)
+        
+        if img1 is None or img2 is None:
+            continue
+        
+        # 调整图像大小以便并排显示
+        max_height = 400
+        scale1 = max_height / img1.shape[0]
+        scale2 = max_height / img2.shape[0]
+        
+        img1_resized = cv2.resize(img1, (int(img1.shape[1] * scale1), max_height))
+        img2_resized = cv2.resize(img2, (int(img2.shape[1] * scale2), max_height))
+        
+        # 获取特征点
+        kp1 = features_data[key_center]['kp']
+        kp2 = features_data[key]['kp']
+        
+        # 创建拼接图像
+        h1, w1 = img1_resized.shape[:2]
+        h2, w2 = img2_resized.shape[:2]
+        
+        vis = np.zeros((max(h1, h2), w1 + w2, 3), np.uint8)
+        vis[:h1, :w1] = img1_resized
+        vis[:h2, w1:w1+w2] = img2_resized
+        
+        # 绘制匹配线 (最多显示30条，避免图像过于混乱)
+        display_count = min(len(matches), 30)
+        for i in range(display_count):
+            idx1, idx2 = int(matches[i][0]), int(matches[i][1])
+            
+            # 获取调整后的坐标点
+            pt1 = (int(kp1[idx1][0] * scale1), int(kp1[idx1][1] * scale1))
+            pt2 = (int(kp2[idx2][0] * scale2) + w1, int(kp2[idx2][1] * scale2))
+            
+            # 绘制线和点
+            cv2.line(vis, pt1, pt2, (0, 255, 0), 1)
+            cv2.circle(vis, pt1, 3, (0, 255, 0), -1)
+            cv2.circle(vis, pt2, 3, (0, 255, 0), -1)
+        
+        # 添加文本信息
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        cv2.putText(vis, f"{key_center}-{key}: {len(matches)} 匹配点", 
+                   (10, 30), font, 1, (255, 255, 255), 2)
+        
+        # 保存匹配可视化
+        match_viz_path = os.path.join(output_dir, f"{key_center}_{key}_match.jpg")
+        cv2.imwrite(match_viz_path, vis)
+        print(f"匹配可视化已保存至: {match_viz_path}")
+    
+    plt.close('all')
+    return G  # 返回图对象，便于进一步分析
+
+def filter_matches_graph(frames, matches_dict, features_data_t, threshold=0.6, distance_threshold=10.0, inlier_ratio_threshold=0.8, verbose=True, output_csv=None):
     """
     基于图结构的匹配过滤函数，去除不一致的匹配及靠近不一致匹配的点对。
     
@@ -135,16 +415,25 @@ def filter_matches_graph(frames, matches_dict, features_data_t, threshold=0.6, d
         threshold: 循环一致性过滤阈值
         distance_threshold: 空间邻近过滤的距离阈值（像素）
         verbose: 是否输出详细统计信息
+        output_csv: 保存循环误差统计的CSV文件路径
         
     Returns:
         filtered_matches_dict: 过滤后的匹配字典
     """
+    import numpy as np
+    import pandas as pd
+    import os
+    import csv
+    import copy
+    from collections import defaultdict
+    import networkx as nx
 
     features_data_t = copy.deepcopy(features_data_t)
     features_data = {k: {"kp":v['kp'].cpu().numpy()} for k, v in features_data_t.items()}
+    
     # 记录每个阶段的匹配数量
     stats = defaultdict(dict)
-    
+        
     # 新字典去除matches_dict中的分数
     filtered_matches_dict = {}
     for key_pair, matches in matches_dict.items():
@@ -153,6 +442,7 @@ def filter_matches_graph(frames, matches_dict, features_data_t, threshold=0.6, d
             # 记录初始匹配数
             stats["初始"][key_pair] = len(matches[0])
     
+    # return filtered_matches_dict, None
     # 构建图像之间的连接图
     G = nx.Graph()
     match_stats = defaultdict(int)
@@ -174,6 +464,9 @@ def filter_matches_graph(frames, matches_dict, features_data_t, threshold=0.6, d
     cycle_total_checked = 0
     proximity_filtered_count = 0  # 新增：统计因邻近过滤移除的匹配数
     
+    # 创建用于记录循环误差的数据结构
+    cycle_error_data = []
+    
     # 查找所有长度为3的循环
     for cycle in nx.cycle_basis(G):
         if len(cycle) == 3:
@@ -184,6 +477,9 @@ def filter_matches_graph(frames, matches_dict, features_data_t, threshold=0.6, d
                 (keys[1], keys[2]),
                 (keys[2], keys[0])
             ]
+            
+            # 三元组名称
+            cycle_name = f"{keys[0]}-{keys[1]}-{keys[2]}"
             
             # 检查所有匹配对是否存在
             valid_cycle = True
@@ -201,6 +497,9 @@ def filter_matches_graph(frames, matches_dict, features_data_t, threshold=0.6, d
             match_maps = []
             pair_keys = []
             
+            # 记录每对之间的匹配数量
+            pair_match_counts = []
+            
             for key1, key2 in pairs:
                 pair_key = f"{key1}-{key2}"
                 reverse_key = f"{key2}-{key1}"
@@ -213,6 +512,8 @@ def filter_matches_graph(frames, matches_dict, features_data_t, threshold=0.6, d
                     matches = filtered_matches_dict[reverse_key]
                     is_reverse = True
                     pair_keys.append(reverse_key)
+                
+                pair_match_counts.append(len(matches))
                 
                 # 创建从idx1到idx2的映射以及索引映射（用于掩码）
                 if is_reverse:
@@ -248,12 +549,53 @@ def filter_matches_graph(frames, matches_dict, features_data_t, threshold=0.6, d
             pt1 = kp1[idx1_arr[valid]]
             pt1_cycle = kp1[idx1_cycle_arr[valid]]
 
-            # === Step 4: 距离检查（是否一致） ===
+            # === Step 4: 距离检查（是否一致）并记录循环误差 ===
             same_index = idx1_arr[valid] == idx1_cycle_arr[valid]
-            distance = np.linalg.norm(pt1 - pt1_cycle, axis=1)
-            close_enough = distance < 5
+            distances = np.linalg.norm(pt1 - pt1_cycle, axis=1)
+            close_enough = distances < 5
             is_consistent = same_index | close_enough
-
+            
+            # 计算循环误差均值
+            if len(distances) > 0:
+                mean_cycle_error = np.mean(distances)
+                
+                # 如果循环误差过大，移除该三元组中匹配数量最少的匹配对
+                if mean_cycle_error > 60 and (max(pair_match_counts) - min(pair_match_counts) > 100):
+                    # 找出三对匹配中数量最少的一对
+                    min_match_count = min(pair_match_counts)
+                    min_match_idx = pair_match_counts.index(min_match_count)
+                    pair_to_remove = pair_keys[min_match_idx]
+                    
+                    if verbose:
+                        print(f"三元组 {cycle_name} 循环误差过大 ({mean_cycle_error:.2f} > 30)，移除最弱匹配对 {pair_to_remove} (匹配数: {min_match_count})")
+                    
+                    # 将该匹配对从 filtered_matches_dict 中移除
+                    if pair_to_remove in filtered_matches_dict:
+                        del filtered_matches_dict[pair_to_remove]
+                        
+                        # 更新统计信息
+                        stats["循环误差过滤"][pair_to_remove] = 0
+                        
+                        # 更新图结构，移除边
+                        key1, key2 = pair_to_remove.split('-')
+                        if G.has_edge(key1, key2):
+                            G.remove_edge(key1, key2)
+                            
+                        # 由于已经移除了匹配对，这个三元组不需要进行后续的一致性检查
+                        # 直接跳过当前循环的后续步骤
+                        continue
+                
+                                # 记录循环误差数据
+                
+                cycle_error_data.append({
+                    'cycle': cycle_name,
+                    'mean_error': mean_cycle_error,
+                    'matches_1': pair_match_counts[0],
+                    'matches_2': pair_match_counts[1],
+                    'matches_3': pair_match_counts[2],
+                    'checked_points': len(distances),
+                    'consistent_points': np.sum(is_consistent)
+                })
             consistent_valid_idx = valid_idx[is_consistent]
             inconsistent_valid_idx = valid_idx[~is_consistent]
 
@@ -295,7 +637,8 @@ def filter_matches_graph(frames, matches_dict, features_data_t, threshold=0.6, d
                 # 添加对应的坐标
                 inconsistent_points[0][pair_keys[0]].append(kp1[idx1])
                 inconsistent_points[1][pair_keys[1]].append(kp2[idx2])
-                inconsistent_points[2][pair_keys[2]].append(kp3[idx3])   
+                inconsistent_points[2][pair_keys[2]].append(kp3[idx3])
+            
             # 更新掩码 - 只将不一致的匹配设为False
             for i in range(3):
                 for idx in checked_indices[i]:
@@ -311,40 +654,59 @@ def filter_matches_graph(frames, matches_dict, features_data_t, threshold=0.6, d
                     consist_ratio = len(consistent_indices[i]) / len(checked_indices[i]) * 100
                     print(f"{pair_keys[i]}: 循环检查了 {len(checked_indices[i])} 个匹配, 一致: {len(consistent_indices[i])} ({consist_ratio:.1f}%)")
             
-                # 3. 移除靠近不一致匹配的点对
-                if 1:
-                    for i, pair_key in enumerate(pair_keys):
-                        if pair_key in inconsistent_points[i] and len(inconsistent_points[i][pair_key]) > 0:
-                            key1, key2 = pair_key.split('-')
-                            matches = filtered_matches_dict[pair_key]
-                            kp1 = features_data[key1]['kp']
-                            kp2 = features_data[key2]['kp']
-                            matched_pts1 = kp1[matches[:, 0]]  # 形状: (M, 2)，M 是匹配点对数
-                            matched_pts2 = kp2[matches[:, 1]]  # 形状: (M, 2)
-                            
-                            inconsistent_pts = np.array(inconsistent_points[i][pair_key])  # 形状: (N, 2)，N 是不一致点数
-                            
-                            # 计算所有匹配点与所有不一致点的距离（向量化）
-                            # matched_pts1: (M, 2) -> (M, 1, 2)
-                            # inconsistent_pts: (N, 2) -> (1, N, 2)
-                            # 广播后得到距离矩阵: (M, N)
-                            distances1 = np.linalg.norm(matched_pts1[:, np.newaxis] - inconsistent_pts[np.newaxis, :], axis=2)
-                            distances2 = np.linalg.norm(matched_pts2[:, np.newaxis] - inconsistent_pts[np.newaxis, :], axis=2)
-                            
-                            # 找到距离小于阈值的匹配点（在任一图像中）
-                            proximity_mask = np.any(distances1 < distance_threshold, axis=1) | np.any(distances2 < distance_threshold, axis=1)
-                            
-                            # 更新掩码：仅保留未标记为不一致且不在邻近范围的匹配
-                            original_mask = match_masks[pair_key].copy()
-                            match_masks[pair_key] = match_masks[pair_key] & ~proximity_mask
-                            
-                            # 统计因邻近过滤移除的匹配数
-                            removed_count = np.sum(original_mask & proximity_mask)
-                            proximity_filtered_count += removed_count
-                            
-                            if verbose and removed_count > 0:
-                                print(f"{pair_key}: 邻近过滤移除 {removed_count} 对匹配")
-                    
+            # 3. 移除靠近不一致匹配的点对
+            if distance_threshold > 0:
+                for i, pair_key in enumerate(pair_keys):
+                    if pair_key in inconsistent_points[i] and len(inconsistent_points[i][pair_key]) > 0:
+                        key1, key2 = pair_key.split('-')
+                        matches = filtered_matches_dict[pair_key]
+                        kp1 = features_data[key1]['kp']
+                        kp2 = features_data[key2]['kp']
+                        matched_pts1 = kp1[matches[:, 0]]
+                        matched_pts2 = kp2[matches[:, 1]]
+                        
+                        inconsistent_pts = np.array(inconsistent_points[i][pair_key])
+                        
+                        # 计算所有匹配点与所有不一致点的距离（向量化）
+                        distances1 = np.linalg.norm(matched_pts1[:, np.newaxis] - inconsistent_pts[np.newaxis, :], axis=2)
+                        distances2 = np.linalg.norm(matched_pts2[:, np.newaxis] - inconsistent_pts[np.newaxis, :], axis=2)
+                        
+                        # 找到距离小于阈值的匹配点（在任一图像中）
+                        proximity_mask = np.any(distances1 < distance_threshold, axis=1) | np.any(distances2 < distance_threshold, axis=1)
+                        
+                        # 更新掩码：仅保留未标记为不一致且不在邻近范围的匹配
+                        original_mask = match_masks[pair_key].copy()
+                        match_masks[pair_key] = match_masks[pair_key] & ~proximity_mask
+                        
+                        # 统计因邻近过滤移除的匹配数
+                        removed_count = np.sum(original_mask & proximity_mask)
+                        proximity_filtered_count += removed_count
+                        
+                        if verbose and removed_count > 0:
+                            print(f"{pair_key}: 邻近过滤移除 {removed_count} 对匹配")
+    
+    # 将循环误差数据保存到CSV文件
+    if output_csv and cycle_error_data:
+        # 创建目录（如果不存在）
+        output_dir = os.path.dirname(output_csv)
+        if output_dir and not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+            
+        # 将数据转换为DataFrame并保存为CSV
+        df = pd.DataFrame(cycle_error_data)
+        df.to_csv(output_csv, index=False)
+        
+        if verbose:
+            print(f"循环误差统计已保存至: {output_csv}")
+            
+        # 打印一些汇总统计
+        if verbose:
+            print("\n循环误差统计摘要:")
+            print(f"总三元组数量: {len(df)}")
+            print(f"平均循环误差: {df['mean_error'].mean():.2f} 像素")
+            print(f"最大循环误差: {df['mean_error'].max():.2f} 像素")
+            print(f"最小循环误差: {df['mean_error'].min():.2f} 像素")
+    
     # 应用循环一致性和邻近过滤掩码
     for key_pair in filtered_matches_dict:
         if key_pair in match_masks:
@@ -365,247 +727,79 @@ def filter_matches_graph(frames, matches_dict, features_data_t, threshold=0.6, d
         stats["循环一致性检查后"][key_pair] = len(filtered_matches_dict[key_pair])
     
     # 4. 移除匹配点集中在直线附近的匹配对
-    line_removed_pairs = 0
-    for key_pair in list(filtered_matches_dict.keys()):
-        if len(filtered_matches_dict[key_pair]) < 5:  # 匹配点太少无法可靠拟合直线
-            continue
-        
-        key1, key2 = key_pair.split('-')
-        matches = filtered_matches_dict[key_pair]
-        kp1 = features_data[key1]['kp']
-        kp2 = features_data[key2]['kp']
-        matched_pts1 = kp1[matches[:, 0]]  # 形状: (M, 2)
-        matched_pts2 = kp2[matches[:, 1]]  # 形状: (M, 2)
-        
-        # 使用RANSAC拟合直线，检查两张图像的点分布
-        for pts, img_name in [(matched_pts1, key1), (matched_pts2, key2)]:
-            try:
-                # 将点转换为float32以兼容cv2.fitLine
-                pts = pts.astype(np.float32)
-                pts = pts.reshape(-1, 1, 2)  # 转换为 (N, 1, 2) 格式
-                # 使用RANSAC拟合直线
-                # distType=cv2.DIST_L2表示使用最小二乘法，param=0表示自动选择
-                # reps=0.01表示点到直线的距离阈值，aeps=0.01表示角度阈值
-                # 使用 cv2.fitLine 拟合直线
-                vx, vy, x0, y0 = cv2.fitLine(pts, cv2.DIST_L2, 0, 0.01, 0.01)
-
-                # 假设 pts 是 (N, 1, 2) 的点集，vx, vy, x0, y0 是拟合直线的参数
-                # 提取点坐标
-                pts_array = pts[:, 0, :]  # 形状 (N, 2)，即 [px, py]
-
-                # 计算点到直线上某点的向量 (dx, dy)
-                deltas = pts_array - np.array([x0, y0])[None,:,0]  # 形状 (N, 2)
-
-                # 计算点到直线的距离（叉积的模）
-                distances = np.abs(deltas[:, 0] * vy - deltas[:, 1] * vx)  # 形状 (N,)
-
-                # 统计距离小于 10 像素的点数量
-                threshold = 10.0  # 距离阈值（像素）
-                inliers = sum(1 for dist in distances if dist < threshold)
-
-                
-                # 计算内点比例
-                if len(pts) > 0:
-                    inlier_ratio = np.sum(inliers) / len(pts)
-                else:
-                    inlier_ratio = 0.0
-                
-                if verbose:
-                    print(f"{key_pair} 在图像 {img_name} 的内点比例: {inlier_ratio:.2f}")
-                
-                # 如果内点比例超过阈值，移除整个匹配对
-                if inlier_ratio > inlier_ratio_threshold:
-                    if verbose:
-                        print(f"{key_pair}: 在图像 {img_name} 的匹配点过于集中在直线附近 (内点比例 {inlier_ratio:.2f} > {inlier_ratio_threshold})，移除整个匹配对")
-                    del filtered_matches_dict[key_pair]
-                    line_removed_pairs += 1
-                    stats["直线过滤后"][key_pair] = 0
-                    break  # 任一图像的点集中在直线即可移除，无需检查另一张图像
-                
-            except Exception as e:
-                if verbose:
-                    print(f"{key_pair}: 直线拟合出错 (图像 {img_name}) - {e}")
-                continue
-    
-    if verbose and line_removed_pairs > 0:
-        print(f"直线过滤总计移除: {line_removed_pairs} 个匹配对")
-    
-    # 保存直线过滤后的状态
-    for key_pair in filtered_matches_dict:
-        stats["直线过滤后"][key_pair] = len(filtered_matches_dict[key_pair])
-    
-
-    # 后续代码保持不变...
-    # 4. 结合空间一致性检查 (RANSAC)
-    ransac_filtered_count = 0
-    ransac_total_count = 0
     if 0:
+        line_removed_pairs = 0
         for key_pair in list(filtered_matches_dict.keys()):
-            if len(filtered_matches_dict[key_pair]) < 5:
+            if len(filtered_matches_dict[key_pair]) < 5:  # 匹配点太少无法可靠拟合直线
                 continue
             
             key1, key2 = key_pair.split('-')
             matches = filtered_matches_dict[key_pair]
-            
-            # 记录RANSAC前的匹配数
-            before_count = len(matches)
-            ransac_total_count += before_count
-            
-            # 获取匹配点坐标
             kp1 = features_data[key1]['kp']
             kp2 = features_data[key2]['kp']
+            matched_pts1 = kp1[matches[:, 0]]  # 形状: (M, 2)
+            matched_pts2 = kp2[matches[:, 1]]  # 形状: (M, 2)
             
-            matched_pts1 = kp1[matches[:, 0]]
-            matched_pts2 = kp2[matches[:, 1]]
-            
-            # 使用RANSAC计算几何模型 (基础矩阵)
-            if isinstance(matched_pts1, np.ndarray) and isinstance(matched_pts2, np.ndarray):
+            # 使用RANSAC拟合直线，检查两张图像的点分布
+            for pts, img_name in [(matched_pts1, key1), (matched_pts2, key2)]:
                 try:
-                    _, mask = cv2.findFundamentalMat(
-                        matched_pts1, matched_pts2, 
-                        cv2.USAC_MAGSAC, 1.0, 0.999, 10000
-                    )
+                    # 将点转换为float32以兼容cv2.fitLine
+                    pts = pts.astype(np.float32)
+                    pts = pts.reshape(-1, 1, 2)  # 转换为 (N, 1, 2) 格式
+                    # 使用RANSAC拟合直线
+                    # distType=cv2.DIST_L2表示使用最小二乘法，param=0表示自动选择
+                    # reps=0.01表示点到直线的距离阈值，aeps=0.01表示角度阈值
+                    # 使用 cv2.fitLine 拟合直线
+                    vx, vy, x0, y0 = cv2.fitLine(pts, cv2.DIST_L2, 0, 0.01, 0.01)
+
+                    # 假设 pts 是 (N, 1, 2) 的点集，vx, vy, x0, y0 是拟合直线的参数
+                    # 提取点坐标
+                    pts_array = pts[:, 0, :]  # 形状 (N, 2)，即 [px, py]
+
+                    # 计算点到直线上某点的向量 (dx, dy)
+                    deltas = pts_array - np.array([x0, y0])[None,:,0]  # 形状 (N, 2)
+
+                    # 计算点到直线的距离（叉积的模）
+                    distances = np.abs(deltas[:, 0] * vy - deltas[:, 1] * vx)  # 形状 (N,)
+
+                    # 统计距离小于 10 像素的点数量
+                    threshold = 10.0  # 距离阈值（像素）
+                    inliers = sum(1 for dist in distances if dist < threshold)
+
                     
-                    if mask is not None:
-                        inlier_ratio = np.sum(mask) / len(mask)
-                        
-                        # 应用RANSAC筛选
-                        mask = mask.ravel().astype(bool)
-                        filtered_matches_dict[key_pair] = matches[mask]
-                        
-                        # 统计过滤数量
-                        after_count = len(filtered_matches_dict[key_pair])
-                        removed = before_count - after_count
-                        ransac_filtered_count += removed
-                        
-                        if verbose and removed > 0:
-                            print(f"{key_pair}: RANSAC过滤移除 {removed} 对匹配 ({removed/before_count*100:.1f}%)，剩余 {after_count} 对")
+                    # 计算内点比例
+                    if len(pts) > 0:
+                        inlier_ratio = np.sum(inliers) / len(pts)
+                    else:
+                        inlier_ratio = 0.0
+                    
+                    if verbose:
+                        print(f"{key_pair} 在图像 {img_name} 的内点比例: {inlier_ratio:.2f}")
+                    
+                    # 如果内点比例超过阈值，移除整个匹配对
+                    if inlier_ratio > inlier_ratio_threshold:
+                        if verbose:
+                            print(f"{key_pair}: 在图像 {img_name} 的匹配点过于集中在直线附近 (内点比例 {inlier_ratio:.2f} > {inlier_ratio_threshold})，移除整个匹配对")
+                        del filtered_matches_dict[key_pair]
+                        line_removed_pairs += 1
+                        stats["直线过滤后"][key_pair] = 0
+                        break  # 任一图像的点集中在直线即可移除，无需检查另一张图像
+                    
                 except Exception as e:
                     if verbose:
-                        print(f"{key_pair}: RANSAC计算出错 - {e}")
+                        print(f"{key_pair}: 直线拟合出错 (图像 {img_name}) - {e}")
+                    continue
         
-    # 保存RANSAC后的状态
-    for key_pair in filtered_matches_dict:
-        stats["RANSAC过滤后"][key_pair] = len(filtered_matches_dict[key_pair])
-    
-    if verbose and ransac_total_count > 0:
-        print(f"RANSAC总计过滤: {ransac_filtered_count}/{ransac_total_count} 对匹配 ({ransac_filtered_count/ransac_total_count*100:.1f}%)")
-    
-    # 5. 检查匹配点分布 - 使用DBSCAN聚类
-    cluster_filtered_count = 0
-    cluster_total_count = 0
-    
-    # for key_pair in list(filtered_matches_dict.keys()):
-    #     if len(filtered_matches_dict[key_pair]) < 5:
-    #         continue
+        if verbose and line_removed_pairs > 0:
+            print(f"直线过滤总计移除: {line_removed_pairs} 个匹配对")
         
-    #     key1, key2 = key_pair.split('-')
-    #     matches = filtered_matches_dict[key_pair]
+        # 保存直线过滤后的状态
+        for key_pair in filtered_matches_dict:
+            stats["直线过滤后"][key_pair] = len(filtered_matches_dict[key_pair])
         
-    #     # 记录聚类前的匹配数
-    #     before_count = len(matches)
-    #     cluster_total_count += before_count
-        
-    #     # 获取匹配点坐标
-    #     kp1 = features_data[key1]['kp'].cpu().numpy()
-    #     kp2 = features_data[key2]['kp'].cpu().numpy()
-        
-    #     matched_pts1 = kp1[matches[:, 0]]
-    #     matched_pts2 = kp2[matches[:, 1]]
-        
-    #     # 检查匹配点分布 - 使用DBSCAN聚类
-    #     try:
-    #         # 分析匹配点在两张图像中的分布
-    #         db1 = DBSCAN(eps=30, min_samples=3).fit(matched_pts1)
-    #         db2 = DBSCAN(eps=30, min_samples=3).fit(matched_pts2)
-            
-    #         labels1 = db1.labels_
-    #         labels2 = db2.labels_
-            
-    #         # 计算有效聚类数
-    #         n_clusters1 = len(set(labels1)) - (1 if -1 in labels1 else 0)
-    #         n_clusters2 = len(set(labels2)) - (1 if -1 in labels2 else 0)
-            
-    #         if verbose:
-    #             print(f"{key_pair}: 聚类分析 - 图1: {n_clusters1}个聚类, 图2: {n_clusters2}个聚类")
-            
-    #         # 当一张图像中的点形成多个聚类而另一张只有一个聚类时，
-    #         # 可能是将不同物体的相似部分错误匹配在一起
-    #         if max(n_clusters1, n_clusters2) > 1 and min(n_clusters1, n_clusters2) == 1:
-    #             if key_pair not in suspicious_pairs:
-    #                 suspicious_pairs.append(key_pair)
-    #                 if verbose:
-    #                     print(f"{key_pair}: 聚类不平衡，标记为可疑")
-            
-    #         # 如果聚类分析表明存在多个不一致的组，尝试保留主要聚类
-    #         if n_clusters1 > 1 or n_clusters2 > 1:
-    #             # 找出最大的聚类对
-    #             cluster_pairs = {}
-    #             for i in range(len(labels1)):
-    #                 if labels1[i] == -1 or labels2[i] == -1:
-    #                     continue
-    #                 pair = (labels1[i], labels2[i])
-    #                 if pair not in cluster_pairs:
-    #                     cluster_pairs[pair] = 0
-    #                 cluster_pairs[pair] += 1
-                
-    #             if cluster_pairs:
-    #                 main_pair = max(cluster_pairs.items(), key=lambda x: x[1])[0]
-                    
-    #                 # 筛选属于主要聚类对的匹配
-    #                 mask = np.zeros(len(matches), dtype=bool)
-    #                 for i in range(len(labels1)):
-    #                     if (labels1[i], labels2[i]) == main_pair:
-    #                         mask[i] = True
-                    
-    #                 # 应用聚类筛选
-    #                 filtered_matches_dict[key_pair] = matches[mask]
-                    
-    #                 # 统计过滤数量
-    #                 after_count = len(filtered_matches_dict[key_pair])
-    #                 removed = before_count - after_count
-    #                 cluster_filtered_count += removed
-                    
-    #                 if verbose and removed > 0:
-    #                     print(f"{key_pair}: 聚类过滤移除 {removed} 对匹配 ({removed/before_count*100:.1f}%)，剩余 {after_count} 对")
-    #     except Exception as e:
-    #         if verbose:
-    #             print(f"{key_pair}: 聚类分析出错 - {e}")
-    
-    # # 保存聚类分析后的状态
-    # for key_pair in filtered_matches_dict:
-    #     stats["聚类分析后"][key_pair] = len(filtered_matches_dict[key_pair])
-    
-    # if verbose and cluster_total_count > 0:
-    #     print(f"聚类分析总计过滤: {cluster_filtered_count}/{cluster_total_count} 对匹配 ({cluster_filtered_count/cluster_total_count*100:.1f}%)")
-    
-    # ----- 移除了描述子距离过滤部分 -----
-    
-    # 7. 处理可疑匹配对
-    # suspicious_removed_count = 0
-    # suspicious_reduced_count = 0
-    # suspicious_pairs_limit = 10
-    # for key_pair in suspicious_pairs:
-    #     if key_pair in filtered_matches_dict:
-    #         before_count = len(filtered_matches_dict[key_pair])
-            
-    #         # 可选：完全移除或减少匹配数量
-    #         if len(filtered_matches_dict[key_pair]) > 10:
-    #             # 保留最好的少量匹配
-    #             filtered_matches_dict[key_pair] = filtered_matches_dict[key_pair][:10]
-    #             after_count = len(filtered_matches_dict[key_pair])
-    #             suspicious_reduced_count += 1
-                
-    #             if verbose:
-    #                 print(f"{key_pair}: 可疑匹配，减少至 {after_count} 对 (从 {before_count} 对)")
-    #         else:
-    #             del filtered_matches_dict[key_pair]
-    #             suspicious_removed_count += 1
-                
-    #             if verbose:
-    #                 print(f"{key_pair}: 可疑匹配，完全移除 {before_count} 对")
-    
-        # 1. 限制每对图像的最大匹配点数量
+
+    # 后续代码保持不变...
+    # 1. 限制每对图像的最大匹配点数量
     limited_count = 0
     for key_pair in list(filtered_matches_dict.keys()):
         matches = filtered_matches_dict[key_pair]
@@ -617,7 +811,6 @@ def filter_matches_graph(frames, matches_dict, features_data_t, threshold=0.6, d
             if verbose:
                 print(f"{key_pair}: 限制匹配数量从 {len(matches)} 到 {2000}")
 
-
     # 保存最终状态
     for key_pair in list(filtered_matches_dict.keys()):
         stats["最终"][key_pair] = len(filtered_matches_dict[key_pair])
@@ -626,7 +819,11 @@ def filter_matches_graph(frames, matches_dict, features_data_t, threshold=0.6, d
     for key_pair in matches_dict:
         if key_pair not in filtered_matches_dict:
             stats["最终"][key_pair] = 0
-    
+
+    # 保存循环误差过滤状态的初始化
+    for key_pair in filtered_matches_dict:
+        stats["循环误差过滤"][key_pair] = len(filtered_matches_dict[key_pair])
+        
     if verbose:
         print(f"\n匹配过滤统计摘要:")
         print(f"共处理 {len(matches_dict)} 对匹配")
@@ -654,7 +851,7 @@ def filter_matches_graph(frames, matches_dict, features_data_t, threshold=0.6, d
                 line += f" | {value:6}"
             print(line)
     
-    return filtered_matches_dict
+    return filtered_matches_dict, cycle_error_data
 
 def check_cycle_consistency(keys, matches_dict, features_data):
     """

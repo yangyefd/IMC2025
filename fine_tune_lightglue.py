@@ -29,15 +29,106 @@ from losses import NLLLoss
 matplotlib.use('Agg')  # 无界面后端，适合在服务器上运行
 
 IMAGE_SIZE = (800,800)
-kaggle_run = True
+kaggle_run = False
+
+def create_spliced_negative_pair(image_paths, img_idx, splice_ratio_range=(0.3, 0.5)):
+    """
+    创建拼接负样本对 - 将当前图像与另一张随机图像拼接
+    整个拼接图像被视为完全不匹配对，拼接区域占原图30%-50%
+    
+    Args:
+        image_paths: 所有图像路径列表
+        img_idx: 当前图像索引
+        splice_ratio_range: 拼接区域占比范围，默认30%-50%
+        
+    Returns:
+        img1: 原始图像
+        img2: 拼接后的图像
+        transform: 恒等变换矩阵
+    """
+    # 随机选择一张不同的图像进行拼接
+    other_indices = [i for i in range(len(image_paths)) if i != img_idx]
+    if not other_indices:  # 防止只有一张图片的情况
+        other_idx = img_idx
+    else:
+        other_idx = random.choice(other_indices)
+    
+    # 加载图像
+    img1 = load_torch_image(image_paths[img_idx])
+    other_img = load_torch_image(image_paths[other_idx])
+    
+    # 获取图像尺寸
+    C, H, W = img1.shape
+    
+    # 随机决定拼接方向：水平或垂直
+    splice_direction = random.choice(['horizontal', 'vertical'])
+    
+    # 随机决定拼接区域大小（在给定范围内）
+    splice_ratio = random.uniform(splice_ratio_range[0], splice_ratio_range[1])
+    
+    # 创建拼接图像
+    img2 = img1.clone()
+    
+    # 边缘平滑过渡区域宽度
+    blend_width = int(min(H, W) * 0.05)  # 5%的图像尺寸作为过渡带
+    
+    if splice_direction == 'horizontal':
+        # 水平拼接：右侧部分替换
+        splice_width = int(W * splice_ratio)
+        splice_start = W - splice_width
+        
+        # 创建过渡掩码
+        blend_mask = torch.zeros((H, W), device=img1.device)
+        for i in range(blend_width):
+            # 在接缝处创建渐变过渡带
+            pos = splice_start + i - blend_width
+            if 0 <= pos < W:
+                blend_mask[:, pos] = i / blend_width
+        
+        # 在接缝右侧全部替换为其他图像
+        blend_mask[:, splice_start:] = 1.0
+        
+        # 将掩码扩展到所有通道
+        blend_mask = blend_mask.unsqueeze(0).expand(C, -1, -1)
+        
+        # 使用blend_mask混合两张图像
+        img2 = img1 * (1 - blend_mask) + other_img * blend_mask
+        
+    else:  # vertical
+        # 垂直拼接：下部分替换
+        splice_height = int(H * splice_ratio)
+        splice_start = H - splice_height
+        
+        # 创建过渡掩码
+        blend_mask = torch.zeros((H, W), device=img1.device)
+        for i in range(blend_width):
+            # 在接缝处创建渐变过渡带
+            pos = splice_start + i - blend_width
+            if 0 <= pos < H:
+                blend_mask[pos, :] = i / blend_width
+        
+        # 在接缝下方全部替换为其他图像
+        blend_mask[splice_start:, :] = 1.0
+        
+        # 将掩码扩展到所有通道
+        blend_mask = blend_mask.unsqueeze(0).expand(C, -1, -1)
+        
+        # 使用blend_mask混合两张图像
+        img2 = img1 * (1 - blend_mask) + other_img * blend_mask
+    
+    # 创建恒等变换矩阵
+    transform = torch.eye(3)
+    
+    return img1, img2, transform
 
 class AugmentedImagePairDataset(Dataset):
-    def __init__(self, image_paths, num_pairs_per_image=5, color_change_prob=0.3, copy_paste_prob=0.8):
+    def __init__(self, image_paths, num_pairs_per_image=5, color_change_prob=0.3, copy_paste_prob=0.8, negative_sample_prob=0.3):
         self.image_paths = image_paths
         self.num_pairs_per_image = num_pairs_per_image
         self.color_change_prob = color_change_prob
         self.copy_paste_prob = copy_paste_prob  # 新增复制粘贴概率参数
-        
+        self.negative_sample_prob = negative_sample_prob  # 新增负样本概率参数
+
         # 基础变换
         self.color_jitter = K.ColorJitter(0.3, 0.3, 0.3, 0.1, p=0)
         self.perspective = K.RandomPerspective(0.4, p=0.7)
@@ -192,11 +283,30 @@ class AugmentedImagePairDataset(Dataset):
         img_idx = idx // self.num_pairs_per_image
         img_path = self.image_paths[img_idx]
         
-        # 加载原始图像
-        original_img = load_torch_image(img_path)
-        img1 = original_img.clone()
-        img2 = original_img.clone()
+                # 决定是否生成拼接负样本
+        generate_negative = random.random() < self.negative_sample_prob
         
+        is_negative_pair = False
+        if generate_negative:
+            # 创建拼接负样本
+            img1, img2, transform_matrix = create_spliced_negative_pair(self.image_paths, img_idx)
+            is_negative_pair = True
+            # return {
+            #     'image0': img1,
+            #     'image1': img2, 
+            #     'path': img_path,
+            #     'original_idx': img_idx,
+            #     'pair_idx': idx % self.num_pairs_per_image,
+            #     'transform0': transform_matrix,
+            #     'transform1': transform_matrix,
+            #     'is_negative_pair': True
+            # }
+        else:
+            # 加载原始图像
+            original_img = load_torch_image(img_path)
+            img1 = original_img.clone()
+            img2 = original_img.clone()
+            
         with torch.no_grad():
             img1_batch = img1.unsqueeze(0)
             img2_batch = img2.unsqueeze(0)
@@ -252,7 +362,8 @@ class AugmentedImagePairDataset(Dataset):
             'color_change_mask': color_change_mask,
             'copy_paste_applied': apply_copy_paste,
             'src_copy_mask': src_copy_mask,
-            'dst_copy_mask': dst_copy_mask
+            'dst_copy_mask': dst_copy_mask,
+            'is_negative_pair': is_negative_pair
         }
 
 def load_torch_image(image_path, target_size=IMAGE_SIZE):
@@ -382,90 +493,104 @@ def get_gt(data, batch_size, device, distance_threshold=1):
     for b in range(batch_size):
         keypoints0 = data['keypoints0'][b]
         keypoints1 = data['keypoints1'][b]
+        is_negative = data['is_negative_pair'][b]
         N0, N1 = keypoints0.shape[0], keypoints1.shape[0]
         
-        # 检查是否应用了颜色变换，将对应区域的匹配点标记为不匹配
-        if data.get('color_change_applied', False) and data.get('color_change_mask') is not None:
-            color_mask = data['color_change_mask'][b]
-            # 检查keypoints1是否在颜色变换区域内
-            kpts_in_changed_region = color_mask[:, keypoints1[:, 1].long(), keypoints1[:, 0].long()].bool()
-            
-            # 对在颜色变换区域内的关键点，将其视为不匹配
-            for j in range(N1):
-                if kpts_in_changed_region[j]:
-                    match_matrix[b, N0, j] = 1.0  # 设置为不匹配
-                    continue
+        # # 检查是否为负样本对
+        # is_negative = data.get('is_negative_pair', False)
         
-        # 检查是否应用了复制粘贴变换，将源区域和目标区域的匹配点标记为不匹配
-        if data.get('copy_paste_applied', False):
-            src_mask = data['src_copy_mask'][b]
-            dst_mask = data['dst_copy_mask'][b]
-            
-            # 检查keypoints0是否在源区域内
-            kpts0_in_src = src_mask[:, keypoints0[:, 1].long(), keypoints0[:, 0].long()].bool()
-            
-            # 检查keypoints1是否在源区域或目标区域内
-            kpts1_in_src = src_mask[:, keypoints1[:, 1].long(), keypoints1[:, 0].long()].bool()
-            kpts1_in_dst = dst_mask[:, keypoints1[:, 1].long(), keypoints1[:, 0].long()].bool()
-            
-            # 将源区域和目标区域内的点标记为不匹配
+        if is_negative:
+            # 对于负样本，所有keypoints0都标记为不匹配
             for i in range(N0):
-                if kpts0_in_src[i]:
-                    match_matrix[b, i, N1] = 1.0  # 设置为不匹配
+                match_matrix[b, i, N1] = 1.0
             
+            # 所有keypoints1都标记为不匹配
             for j in range(N1):
-                if kpts1_in_src[j] or kpts1_in_dst[j]:
-                    match_matrix[b, N0, j] = 1.0  # 设置为不匹配
-        
-        # 计算正常区域的匹配
-        transform0_inv = torch.inverse(data['transform0'][b].to(device, dtype=keypoints0.dtype))
-        transform1 = data['transform1'][b].to(device, dtype=keypoints0.dtype)
-        known_transform = torch.matmul(transform1, transform0_inv)
-        
-        ones = torch.ones((N0, 1), device=device, dtype=keypoints0.dtype)
-        kpts0_h = torch.cat([keypoints0, ones], dim=1)
-        
-        expected_kpts1 = torch.matmul(known_transform, kpts0_h.t()).t()
-        expected_kpts1 = expected_kpts1[:, :2] / (expected_kpts1[:, 2:] + 1e-8)
-        
-        dist_matrix = torch.cdist(expected_kpts1, keypoints1, p=2)
-        min_dists, min_indices = dist_matrix.min(dim=1)
-        valid_matches = min_dists < distance_threshold
-        
-        # 设置匹配对，但排除已经被标记为不匹配的点
-        for i in range(N0):
-            # 如果keypoint0在源复制区域内，跳过，因为已经被标记为不匹配
-            if data.get('copy_paste_applied', False) and 'src_copy_mask' in data:
-                if data['src_copy_mask'][b][:, keypoints0[i, 1].long(), keypoints0[i, 0].long()].bool():
-                    continue
+                match_matrix[b, N0, j] = 1.0
+                
+        else:
+            # 检查是否应用了颜色变换，将对应区域的匹配点标记为不匹配
+            if data.get('color_change_applied', False) and data.get('color_change_mask') is not None:
+                color_mask = data['color_change_mask'][b]
+                # 检查keypoints1是否在颜色变换区域内
+                kpts_in_changed_region = color_mask[:, keypoints1[:, 1].long(), keypoints1[:, 0].long()].bool()
+                
+                # 对在颜色变换区域内的关键点，将其视为不匹配
+                for j in range(N1):
+                    if kpts_in_changed_region[j]:
+                        match_matrix[b, N0, j] = 1.0  # 设置为不匹配
+                        continue
+            
+            # 检查是否应用了复制粘贴变换，将源区域和目标区域的匹配点标记为不匹配
+            if data.get('copy_paste_applied', False):
+                src_mask = data['src_copy_mask'][b]
+                dst_mask = data['dst_copy_mask'][b]
+                
+                # 检查keypoints0是否在源区域内
+                kpts0_in_src = src_mask[:, keypoints0[:, 1].long(), keypoints0[:, 0].long()].bool()
+                
+                # 检查keypoints1是否在源区域或目标区域内
+                kpts1_in_src = src_mask[:, keypoints1[:, 1].long(), keypoints1[:, 0].long()].bool()
+                kpts1_in_dst = dst_mask[:, keypoints1[:, 1].long(), keypoints1[:, 0].long()].bool()
+                
+                # 将源区域和目标区域内的点标记为不匹配
+                for i in range(N0):
+                    if kpts0_in_src[i]:
+                        match_matrix[b, i, N1] = 1.0  # 设置为不匹配
+                
+                for j in range(N1):
+                    if kpts1_in_src[j] or kpts1_in_dst[j]:
+                        match_matrix[b, N0, j] = 1.0  # 设置为不匹配
+            
+            # 计算正常区域的匹配
+            transform0_inv = torch.inverse(data['transform0'][b].to(device, dtype=keypoints0.dtype))
+            transform1 = data['transform1'][b].to(device, dtype=keypoints0.dtype)
+            known_transform = torch.matmul(transform1, transform0_inv)
+            
+            ones = torch.ones((N0, 1), device=device, dtype=keypoints0.dtype)
+            kpts0_h = torch.cat([keypoints0, ones], dim=1)
+            
+            expected_kpts1 = torch.matmul(known_transform, kpts0_h.t()).t()
+            expected_kpts1 = expected_kpts1[:, :2] / (expected_kpts1[:, 2:] + 1e-8)
+            
+            dist_matrix = torch.cdist(expected_kpts1, keypoints1, p=2)
+            min_dists, min_indices = dist_matrix.min(dim=1)
+            valid_matches = min_dists < distance_threshold
+            
+            # 设置匹配对，但排除已经被标记为不匹配的点
+            for i in range(N0):
+                # 如果keypoint0在源复制区域内，跳过，因为已经被标记为不匹配
+                if data.get('copy_paste_applied', False) and 'src_copy_mask' in data:
+                    if data['src_copy_mask'][b][:, keypoints0[i, 1].long(), keypoints0[i, 0].long()].bool():
+                        continue
+                        
+                if valid_matches[i]:
+                    j = min_indices[i]
                     
-            if valid_matches[i]:
-                j = min_indices[i]
-                
-                # 检查keypoint1是否在变换区域内
-                in_color_change_region = False
-                in_copy_paste_region = False
-                
-                if data.get('color_change_applied', False) and data.get('color_change_mask') is not None:
-                    if data['color_change_mask'][b][:, keypoints1[j, 1].long(), keypoints1[j, 0].long()].bool():
-                        in_color_change_region = True
-                
-                if data.get('copy_paste_applied', False):
-                    if data['src_copy_mask'][b][:, keypoints1[j, 1].long(), keypoints1[j, 0].long()].bool():
-                        in_copy_paste_region = True
-                    if data['dst_copy_mask'][b][:, keypoints1[j, 1].long(), keypoints1[j, 0].long()].bool():
-                        in_copy_paste_region = True
-                
-                # 如果不在任何特殊区域内，则设置为匹配
-                if not in_color_change_region and not in_copy_paste_region:
-                    match_matrix[b, i, j] = 1.0  # 正常匹配
+                    # 检查keypoint1是否在变换区域内
+                    in_color_change_region = False
+                    in_copy_paste_region = False
+                    
+                    if data.get('color_change_applied', False) and data.get('color_change_mask') is not None:
+                        if data['color_change_mask'][b][:, keypoints1[j, 1].long(), keypoints1[j, 0].long()].bool():
+                            in_color_change_region = True
+                    
+                    if data.get('copy_paste_applied', False):
+                        if data['src_copy_mask'][b][:, keypoints1[j, 1].long(), keypoints1[j, 0].long()].bool():
+                            in_copy_paste_region = True
+                        if data['dst_copy_mask'][b][:, keypoints1[j, 1].long(), keypoints1[j, 0].long()].bool():
+                            in_copy_paste_region = True
+                    
+                    # 如果不在任何特殊区域内，则设置为匹配
+                    if not in_color_change_region and not in_copy_paste_region:
+                        match_matrix[b, i, j] = 1.0  # 正常匹配
+                    else:
+                        match_matrix[b, i, N1] = 1.0  # 不匹配
                 else:
                     match_matrix[b, i, N1] = 1.0  # 不匹配
-            else:
-                match_matrix[b, i, N1] = 1.0  # 不匹配
-    
-    data["gt_matches0"] = (match_matrix[:, :, -1] - 0.5) / 0.5
-    data["gt_matches1"] = (match_matrix[:, -1, :] - 0.5) / 0.5
+        
+    data["gt_matches0"] = (0.5 - match_matrix[:, :, -1]) / 0.5
+    data["gt_matches1"] = (0.5 - match_matrix[:, -1, :]) / 0.5
     data["gt_assignment"] = match_matrix
     return data
 
@@ -543,10 +668,10 @@ def visualize_matches(image0, image1, kpts0, kpts1, matches, confidence, correct
         x2, y2 = kpts1[m]
         
         # 确定线条颜色
-        if correct_matches is not None:
-            color = 'green' if correct_matches[i] else 'red'
-        else:
-            color = cmap(norm(confidence[i]))
+        # if correct_matches is not None:
+        #     color = 'green' if correct_matches[i] else 'red'
+        # else:
+        color = cmap(norm(confidence[i]))
         
         # 绘制匹配线
         con = patches.ConnectionPatch(
@@ -683,7 +808,7 @@ def fine_tune_lightglue(lightglue_matcher, images, feature_dir, device, epochs=5
             imgs1 = batch['image1'].to(device)
             transforms0 = batch['transform0'].to(device)
             transforms1 = batch['transform1'].to(device)
-            
+
             # 获取批量图像尺寸
             batch_size = imgs0.shape[0]
             
@@ -712,7 +837,8 @@ def fine_tune_lightglue(lightglue_matcher, images, feature_dir, device, epochs=5
                 'image_size0': img_sizes0,
                 'image_size1': img_sizes1,
                 'transform0': transforms0,
-                'transform1': transforms1
+                'transform1': transforms1,
+                'is_negative_pair':batch['is_negative_pair']
             }
             
             # 使用半精度进行前向传播和损失计算

@@ -509,6 +509,25 @@ def rotate_tensor_kornia(tensor, angle_degrees):
     
     return rotated
 
+# Legacy (broken) sampling of the descriptors
+def sample_descriptors(keypoints, descriptors, s):
+    b, c, h, w = descriptors.shape
+    keypoints = keypoints - s / 2 + 0.5
+    keypoints /= torch.tensor(
+        [(w * s - s / 2 - 0.5), (h * s - s / 2 - 0.5)],
+    ).to(
+        keypoints
+    )[None]
+    keypoints = keypoints * 2 - 1  # normalize to (-1, 1)
+    args = {"align_corners": True} if torch.__version__ >= "1.3" else {}
+    descriptors = torch.nn.functional.grid_sample(
+        descriptors, keypoints.view(b, 1, -1, 2), mode="bilinear", **args
+    )
+    descriptors = torch.nn.functional.normalize(
+        descriptors.reshape(b, c, -1), p=2, dim=1
+    )
+    return descriptors
+
 class Lightglue_Matcher():
     def __init__(self, device, num_features=4096):
         self.model = None
@@ -528,6 +547,7 @@ class Lightglue_Matcher():
             'nms_radius': 2,
             "refinement_radius": 0,
             'trainable': False,
+            "dense_outputs": False,
         })
         model = LightGlue({
             'filter_threshold': 0.1, # 0.1
@@ -705,6 +725,48 @@ class Lightglue_Matcher():
         pred['keypoints0'] = torch.cat([kp * s for kp, s in zip(pred['keypoints0'], data['scale0'][:, None])])
         pred['keypoints_refine0'] = torch.cat([kp * s for kp, s in zip(pred['keypoints_refine0'], data['scale0'][:, None])])
         
+        return pred, data
+
+    def extract_alike(self, img_path0, pts_alike_t):
+        device = self.device
+        pts_alike = pts_alike_t.clone()
+        gray0 = read_image(img_path0, grayscale=True)
+        gray0, scale0 = preprocess(gray0, grayscale=True)
+
+        gray0 = gray0.to(device)[None]
+        scale0 = torch.tensor(scale0).to(device)[None]
+
+        data = {}
+        data.update(dict(gray0=gray0))
+
+        size0 = torch.tensor(data["gray0"].shape[-2:][::-1])[None]
+
+        data.update(dict(size0=size0))
+        data.update(dict(scale0=scale0))
+
+        pred = {}
+        with torch.no_grad():
+            pts_alike = torch.cat([kp / s for kp, s in zip(pts_alike, data['scale0'][:, None])])
+            pred.update({k + '0': v for k, v in self.detector({
+                "image": data["gray0"],
+            }).items()})
+        
+        pts_alike_num = len(pts_alike)
+        pts_num = pred['keypoints0'].shape[1]
+        # 获取特征点和分数
+        keypoints = pred['keypoints0']
+        keypoints[:,pts_num - pts_alike_num:] = pts_alike 
+        dense_descriptors = pred['dense_descriptors0']
+
+        descriptors = sample_descriptors(keypoints, dense_descriptors, 8).transpose(-1, -2)
+        scores = pred['scores0']
+
+        # 更新排序后的结果
+        pred['keypoints0'] = keypoints
+        pred['descriptors0'] = descriptors
+        pred['scores0'] = scores
+        pred['keypoints0'] = torch.cat([kp * s for kp, s in zip(pred['keypoints0'], data['scale0'][:, None])])
+
         return pred, data
 
     def extract_rot(self, img_path0, nms_radius=3):

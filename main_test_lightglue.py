@@ -455,6 +455,54 @@ def detect_sp_ensemble(lightglue_matcher, img_fnames, feature_dir='.featureout',
 
     return
 
+def detect_sp_ensemble_alike(lightglue_matcher, img_fnames, feature_dir='.featureout', num_features=4096, 
+                 resize_to=1024, device=torch.device('cpu')):
+    #集成方法 ALIke sp各提一半点 2048个
+    dtype = torch.float32
+
+    extractor_alike = ALIKED(max_num_keypoints=num_features, detection_threshold=0.01, 
+                    resize=resize_to).eval().to(device, dtype)
+    
+    if not os.path.isdir(feature_dir):
+        os.makedirs(feature_dir)
+    with h5py.File(f'{feature_dir}/keypoints_coarse.h5', mode='w') as f_kp_coarse, \
+         h5py.File(f'{feature_dir}/keypoints.h5', mode='w') as f_kp, \
+         h5py.File(f'{feature_dir}/descriptors.h5', mode='w') as f_desc, \
+         h5py.File(f'{feature_dir}/size.h5', mode='w') as f_size,\
+         h5py.File(f'{feature_dir}/scale.h5', mode='w') as f_scale,\
+         h5py.File(f'{feature_dir}/mask.h5', mode='w') as f_mask:
+        for img_path in tqdm(img_fnames):
+            img_fname = img_path.split('/')[-1]
+            img_fname = img_fname.split('\\')[-1]
+            key = img_fname
+            with torch.inference_mode():
+                kpts = np.zeros((num_features*2,2)).astype(np.float32)
+                kpts_refine = np.zeros((num_features*2,2)).astype(np.float32)
+                descs = np.zeros((num_features*2,256)).astype(np.float32)
+
+                
+                image0 = load_torch_image(img_path, device=device).to(dtype)
+                feats0_alike = extractor_alike.extract(image0)
+
+                feats0, data = lightglue_matcher.extract_alike(img_path, feats0_alike['keypoints'])
+                feats0_kpts = feats0['keypoints0'].reshape(-1, 2).detach().cpu().numpy()
+                kpts[:len(feats0_kpts)] = feats0['keypoints0'].reshape(-1, 2).detach().cpu().numpy()
+                kpts_refine[:len(feats0_kpts)] = feats0['keypoints_refine0'].reshape(-1, 2).detach().cpu().numpy()
+                descs[:len(feats0_kpts)] = feats0['descriptors0'].reshape(len(feats0_kpts), -1).detach().cpu().numpy()
+
+                feats0_alike_pkts = feats0_alike['keypoints'].reshape(-1, 2).detach().cpu().numpy()
+                kpts[num_features:num_features+len(feats0_alike_pkts)] = feats0_alike_pkts
+                descs[num_features:num_features+len(feats0_alike_pkts),:128] = feats0_alike['descriptors'].reshape(len(feats0_alike_pkts), -1).detach().cpu().numpy()
+
+                f_kp_coarse[key] = kpts
+                f_kp[key] = kpts
+                f_desc[key] = descs
+                f_size[key] = data['size0'].cpu()
+                f_scale[key] = data['scale0'].cpu()
+                f_mask[key] = np.array([len(feats0_kpts), len(feats0_alike_pkts)])
+
+    return
+
 def detect_sp_ensemble_rot(lightglue_matcher, img_fnames, feature_dir='.featureout', num_features=4096, 
                  resize_to=1024, device=torch.device('cpu')):
     #集成方法 ALIke sp各提一半点 2048个
@@ -2220,7 +2268,7 @@ def match_with_gimlightglue_batch(lightglue_matcher, img_fnames, index_pairs, fe
     return match_matrix
 
 def match_with_gimlightglue_ensemble(lightglue_matcher, img_fnames, index_pairs, feature_dir='.featureout', 
-                                           device=torch.device('cpu'), min_matches=29, batch_size=2, 
+                                           device=torch.device('cpu'), min_matches=30, batch_size=2, 
                                            tok_limit=1200, match_limit=4096, verbose=True, visualize=True):
     """
     使用批处理方式进行特征匹配，点数不会超过 max_points，但可能小于。
@@ -2344,6 +2392,9 @@ def match_with_gimlightglue_ensemble(lightglue_matcher, img_fnames, index_pairs,
         else:
             single_pairs_lst.append(pair_idx)
 
+    run_pairs = 0
+    success_pairs = 0
+    lg_finetuned = False
     # 批量处理点数相同的图像对
     with h5py.File(f'{feature_dir}/matches.h5', mode='w') as f_match:
         # 将图像对分成批次
@@ -2423,6 +2474,25 @@ def match_with_gimlightglue_ensemble(lightglue_matcher, img_fnames, index_pairs,
                 'scale1': torch.stack([data['scale1'] for data in batch_data_alike], dim=0).to(device),
             }
 
+            if run_pairs > 10 and (success_pairs / run_pairs < 0.5) and not lg_finetuned and (run_pairs / len(batch_pairs_lst) < 0.5):
+                print("Finetuning LightGlue matcher...")
+                lg_finetuned = True
+                # try:
+                #     # 3. 微调LightGlue
+                #     t = time()
+                #     fine_tuned_matcher = fine_tune_lightglue(
+                #         lightglue_matcher,
+                #         img_fnames, 
+                #         feature_dir, 
+                #         device,
+                #         batch_size=8,
+                #         epochs=2
+                #     )
+                #     lightglue_matcher.update_model(fine_tuned_matcher)
+                #     print(f'模型微调完成，耗时 {time() - t:.4f} sec')
+                # except Exception as e:
+                #     print(f"微调LightGlue失败: {e}")
+
             # 批量推理
             with torch.inference_mode():
                 batch_dists, batch_idxs = lightglue_matcher.match_batch(batch_preds)
@@ -2452,6 +2522,7 @@ def match_with_gimlightglue_ensemble(lightglue_matcher, img_fnames, index_pairs,
             batch_dists = sorted_dists
             # 处理结果
             for i, (idx1, idx2, key1, key2, fname1, fname2) in enumerate(batch_info):
+                run_pairs += 1
                 if i >= len(batch_idxs) or batch_idxs[i] is None or len(batch_idxs[i]) == 0:
                     continue
                 
@@ -2490,7 +2561,8 @@ def match_with_gimlightglue_ensemble(lightglue_matcher, img_fnames, index_pairs,
                         
                         match_key = f"{key1}-{key2}"
                         match_dict[match_key] = [idxs.detach().cpu().numpy(), match_scores.detach().cpu().numpy()]
-
+                        
+                        success_pairs += 1
                             
                         # 可视化匹配
                         if visualize:
@@ -4215,6 +4287,7 @@ def import_into_colmap(img_dir, feature_dir='.featureout', database_path='colmap
     db.commit()
     return
 
+
 # @dataclasses.dataclass
 # class Prediction:
 #     image_id: str | None
@@ -4310,7 +4383,7 @@ for dataset, predictions in samples.items():
     feature_dir = os.path.join(workdir, 'featureout', dataset)
     os.makedirs(feature_dir, exist_ok=True)
 
-    if 1:
+    if 0:
         # try:
         t = time()
         # index_pairs = get_image_pairs_shortlist(images, sim_th=0.3, min_pairs=20, 
@@ -4357,18 +4430,18 @@ for dataset, predictions in samples.items():
         # timings['feature_matching'].append(time() - t)
         # print(f'Features matched in {time() - t:.4f} sec')
 
-        # # 3. 微调LightGlue
-        # t = time()
-        # fine_tuned_matcher = fine_tune_lightglue(
-        #     lightglue_matcher,
-        #     images, 
-        #     feature_dir, 
-        #     device,
-        #     batch_size=8,
-        #     epochs=2
-        # )
-        # lightglue_matcher.update_model(fine_tuned_matcher)
-        # print(f'模型微调完成，耗时 {time() - t:.4f} sec')
+        # 3. 微调LightGlue
+        t = time()
+        fine_tuned_matcher = fine_tune_lightglue(
+            lightglue_matcher,
+            images, 
+            feature_dir, 
+            device,
+            batch_size=8,
+            epochs=2
+        )
+        lightglue_matcher.update_model(fine_tuned_matcher)
+        print(f'模型微调完成，耗时 {time() - t:.4f} sec')
         
 
         t = time()
@@ -4380,7 +4453,7 @@ for dataset, predictions in samples.items():
         print('match_matrix', match_matrix.sum())
 
     if 1:
-        from data_process.filter_match import filter_matches_graph, visualize_filtered_matches
+        from data_process.filter_match import filter_matches_graph, visualize_filtered_matches, visualize_connections
         features_data = {}
         with h5py.File(f'{feature_dir}/keypoints_coarse.h5', mode='r') as f_kp, \
             h5py.File(f'{feature_dir}/descriptors.h5', mode='r') as f_desc, \
@@ -4399,10 +4472,15 @@ for dataset, predictions in samples.items():
 
         with open(os.path.join(feature_dir, 'match_dict.pkl'), 'rb') as f:
             matches_dict = pickle.load(f)
-        filtered_matches_dict = filter_matches_graph(images, matches_dict, features_data)
+        cycle_csv_path = os.path.join(feature_dir, 'matches.csv')
+        filtered_matches_dict, cycle_error_data = filter_matches_graph(images, matches_dict, features_data, output_csv=cycle_csv_path)
 
-        # # 可视化过滤结果
-        visualize_filtered_matches(images, matches_dict, filtered_matches_dict, features_data, os.path.join(feature_dir, 'graph_results'))
+        # # 示例调用
+        # key = "stairs_split_1_1710453930259.png"  # 你想作为中心的图像关键字
+        # visualize_connections(key, filtered_matches_dict, features_data, images, "connections_viz")
+
+        # # # 可视化过滤结果
+        # visualize_filtered_matches(images, matches_dict, filtered_matches_dict, features_data, os.path.join(feature_dir, 'graph_results'))
         
         import shutil
         # 备份原始 matches.h5 文件（如果存在）
@@ -4454,6 +4532,11 @@ for dataset, predictions in samples.items():
     timings['RANSAC'].append(time() - t)
     print(f'Ran RANSAC in {time() - t:.4f} sec')
     
+    # best_pair = find_best_initial_pair(match_matrix, features_data)
+    # if best_pair:
+    #     mapper_options.init_image_id1 = best_pair[0]
+    #     mapper_options.init_image_id2 = best_pair[1]
+
     mapper_options = pycolmap.IncrementalPipelineOptions()
     mapper_options.min_model_size = 5
     mapper_options.max_num_models = 30
@@ -4470,6 +4553,7 @@ for dataset, predictions in samples.items():
                                         image_path=images_dir,
                                         output_path=output_path,
                                         options=mapper_options)
+
     sleep(1)
     timings['Reconstruction'].append(time() - t)
     print(f'Reconstruction done in  {time() - t:.4f} sec')
