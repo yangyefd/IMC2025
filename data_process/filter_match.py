@@ -404,13 +404,294 @@ def visualize_connections(key_center, filtered_matches_dict, features_data, fram
     plt.close('all')
     return G  # 返回图对象，便于进一步分析
 
+def visualize_cycle_consistency(cycle_name, frames, matches_dict, features_data, output_dir=None):
+    """
+    可视化三元组中的循环一致性检查。
+    
+    Args:
+        cycle_name: 三元组名称，格式为 "img1-img2-img3"
+        frames: 图像路径列表
+        matches_dict: 匹配字典
+        features_data: 特征数据字典
+        output_dir: 输出目录
+    """
+    import cv2
+    import numpy as np
+    from pathlib import Path
+    import matplotlib.pyplot as plt
+    
+    # 解析三元组中的图像名称
+    keys = cycle_name.split('-')
+    if len(keys) != 3:
+        raise ValueError(f"Invalid cycle name: {cycle_name}")
+    
+    # 获取图像路径
+    img_paths = {}
+    for key in keys:
+        for frame in frames:
+            if key in frame:
+                img_paths[key] = frame
+                break
+    
+    if len(img_paths) != 3:
+        raise ValueError("Cannot find all images in frames")
+    
+    # 读取图像
+    images = {k: cv2.imread(str(p)) for k, p in img_paths.items()}
+    
+    # 创建一个大画布，3x2布局
+    fig = plt.figure(figsize=(20, 10))
+    
+    # 第一行：显示三张原始图像
+    for i, key in enumerate(keys):
+        plt.subplot(2, 3, i+1)
+        plt.imshow(cv2.cvtColor(images[key], cv2.COLOR_BGR2RGB))
+        plt.title(key)
+        plt.axis('off')
+    
+    # 第二行：显示三对匹配关系
+    pairs = [
+        (keys[0], keys[1]),
+        (keys[1], keys[2]),
+        (keys[2], keys[0])
+    ]
+    
+    # 收集所有匹配以便统计
+    cycle_matches = []
+    matched_points = {k: set() for k in keys}
+    
+    # 为每对图像创建匹配可视化
+    for i, (key1, key2) in enumerate(pairs):
+        pair_key = f"{key1}-{key2}"
+        reverse_key = f"{key2}-{key1}"
+        
+        if pair_key in matches_dict:
+            matches = matches_dict[pair_key]
+            is_reverse = False
+        elif reverse_key in matches_dict:
+            matches = matches_dict[reverse_key]
+            is_reverse = True
+        else:
+            continue
+            
+        # 获取特征点
+        kp1 = features_data[key1]['kp']
+        kp2 = features_data[key2]['kp']
+        
+        # 收集匹配信息
+        cycle_matches.append({
+            'key1': key1,
+            'key2': key2,
+            'matches': matches,
+            'is_reverse': is_reverse
+        })
+        
+        # 收集匹配点
+        for m in matches:
+            if is_reverse:
+                matched_points[key1].add(int(m[1]))
+                matched_points[key2].add(int(m[0]))
+            else:
+                matched_points[key1].add(int(m[0]))
+                matched_points[key2].add(int(m[1]))
+        
+        # 创建拼接图像
+        h1, w1 = images[key1].shape[:2]
+        h2, w2 = images[key2].shape[:2]
+        vis = np.zeros((max(h1, h2), w1+w2, 3), dtype=np.uint8)
+        vis[:h1, :w1] = images[key1]
+        vis[:h2, w1:w1+w2] = images[key2]
+        
+        plt.subplot(2, 3, i+4)
+        plt.imshow(cv2.cvtColor(vis, cv2.COLOR_BGR2RGB))
+        plt.title(f"{key1}-{key2}: {len(matches)} matches")
+        
+        # 绘制匹配线（最多显示50条，避免过于混乱）
+        display_matches = matches[:50] if len(matches) > 50 else matches
+        for m in display_matches:
+            if is_reverse:
+                pt1 = tuple(map(int, kp2[m[0]]))
+                pt2 = tuple(map(int, kp1[m[1]]))
+            else:
+                pt1 = tuple(map(int, kp1[m[0]]))
+                pt2 = tuple(map(int, kp2[m[1]]))
+            
+            pt2 = (pt2[0] + w1, pt2[1])  # 调整第二张图中点的x坐标
+            
+            # 绘制匹配线和点
+            plt.plot([pt1[0], pt2[0]], [pt1[1], pt2[1]], 'g-', linewidth=0.5, alpha=0.5)
+            plt.plot(pt1[0], pt1[1], 'r.', markersize=3)
+            plt.plot(pt2[0], pt2[1], 'r.', markersize=3)
+        
+        plt.axis('off')
+    
+    # 添加一些统计信息
+    info_text = f"Cycle: {cycle_name}\n"
+    for pair in cycle_matches:
+        info_text += f"{pair['key1']}-{pair['key2']}: {len(pair['matches'])} matches\n"
+    
+    plt.figtext(0.02, 0.02, info_text, fontsize=10)
+    
+    # 保存结果
+    if output_dir:
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        plt.savefig(output_dir / f"cycle_{cycle_name.replace('.png','')}.png", 
+                   bbox_inches='tight', dpi=300)
+        plt.close()
+    else:
+        plt.show()
+
+def visualize_cycle_consistency_with_tracks(cycle_name, frames, matches_dict, features_data, output_dir=None, top_n=10):
+    """
+    可视化三元组中距离最大的 top_n 个点的追踪路径。
+    """
+    import cv2
+    import numpy as np
+    from pathlib import Path
+    import matplotlib.pyplot as plt
+    import matplotlib.colors as mcolors
+
+    # 解析三元组中的图像名称
+    keys = cycle_name.split('-')
+    if len(keys) != 3:
+        raise ValueError(f"Invalid cycle name: {cycle_name}")
+    
+    # 获取图像路径和读取图像
+    img_paths = {}
+    for key in keys:
+        for frame in frames:
+            if key in frame:
+                img_paths[key] = frame
+                break
+    images = {k: cv2.imread(str(p)) for k, p in img_paths.items()}
+    
+    # 构建匹配链
+    pairs = [(keys[0], keys[1]), (keys[1], keys[2]), (keys[2], keys[0])]
+    match_maps = []
+    pair_keys = []
+    is_reverse_lst = []
+    for key1, key2 in pairs:
+        pair_key = f"{key1}-{key2}"
+        reverse_key = f"{key2}-{key1}"
+        
+        if pair_key in matches_dict:
+            matches = matches_dict[pair_key]
+            is_reverse = False
+            pair_keys.append(pair_key)
+        else:
+            matches = matches_dict[reverse_key]
+            is_reverse = True
+            pair_keys.append(reverse_key)
+        is_reverse_lst.append(is_reverse)
+        # 创建正向或反向的匹配映射
+        if is_reverse:
+            match_map = {int(m[1]): int(m[0]) for m in matches}
+        else:
+            match_map = {int(m[0]): int(m[1]) for m in matches}
+        match_maps.append(match_map)
+    
+    # 计算循环误差
+    matches0 = np.array(matches_dict[pair_keys[0]], dtype=int)
+    if is_reverse_lst[0]:
+        idx1_arr = matches0[:, 1]
+        idx2_arr = matches0[:, 0]
+    else:
+        idx1_arr = matches0[:, 0]
+        idx2_arr = matches0[:, 1]
+        
+    # 计算完整循环
+    idx3_arr = np.array([match_maps[1].get(idx2, -1) for idx2 in idx2_arr])
+    valid_1 = idx3_arr != -1
+    idx1_cycle_arr = np.array([match_maps[2].get(idx3, -1) if valid else -1
+                              for idx3, valid in zip(idx3_arr, valid_1)])
+    valid_2 = idx1_cycle_arr != -1
+    valid = valid_1 & valid_2
+    
+    # 计算误差距离
+    kp1 = np.array(features_data[keys[0]]['kp'])
+    pt1 = kp1[idx1_arr[valid]]
+    pt1_cycle = kp1[idx1_cycle_arr[valid]]
+    distances = np.linalg.norm(pt1 - pt1_cycle, axis=1)
+    
+    # 获取距离最大的 top_n 个点的索引
+    top_indices = np.argsort(distances)[-top_n:][::-1]
+    
+    # 创建图像
+    plt.figure(figsize=(20, 8))
+    
+    # 计算图像拼接
+    max_h = max(img.shape[0] for img in images.values())
+    total_w = sum(img.shape[1] for img in images.values())
+    canvas = np.zeros((max_h, total_w, 3), dtype=np.uint8)
+    
+    # 拼接图像
+    current_w = 0
+    x_offsets = {}
+    for k, img in images.items():
+        h, w = img.shape[:2]
+        canvas[:h, current_w:current_w+w] = img
+        x_offsets[k] = current_w
+        current_w += w
+    
+    plt.imshow(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB))
+    
+    # 为top_n个点分配不同颜色
+    colors = plt.cm.rainbow(np.linspace(0, 1, top_n))
+    
+    # 绘制追踪路径
+    for color_idx, idx in enumerate(top_indices):
+        # 获取原始点索引
+        idx1 = idx1_arr[valid][idx]
+        idx2 = idx2_arr[valid][idx]
+        idx3 = idx3_arr[valid][idx]
+        idx1_cycle = idx1_cycle_arr[valid][idx]
+        
+        # 获取所有点的坐标
+        pt1 = kp1[idx1]
+        pt2 = np.array(features_data[keys[1]]['kp'][idx2])
+        pt3 = np.array(features_data[keys[2]]['kp'][idx3])
+        pt1_c = kp1[idx1_cycle]
+        
+        # 调整x坐标以适应拼接图像
+        pts = np.array([
+            [pt1[0] + x_offsets[keys[0]], pt1[1]],
+            [pt2[0] + x_offsets[keys[1]], pt2[1]],
+            [pt3[0] + x_offsets[keys[2]], pt3[1]],
+            [pt1_c[0] + x_offsets[keys[0]], pt1_c[1]]
+        ])
+        
+        # 绘制路径
+        plt.plot(pts[:, 0], pts[:, 1], '-', color=colors[color_idx], 
+                linewidth=2, label=f'Error: {distances[idx]:.1f}px')
+        plt.plot(pts[:, 0], pts[:, 1], 'o', color=colors[color_idx], 
+                markersize=8)
+        
+        # 添加编号标签
+        plt.text(pts[0, 0], pts[0, 1]-10, f'{color_idx+1}', 
+                color=colors[color_idx], fontsize=12, ha='center')
+    
+    plt.title(f'Top {top_n} Largest Cycle Errors')
+    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    plt.axis('off')
+    
+    # 保存或显示结果
+    if output_dir:
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        plt.savefig(output_dir / f"cycle_{cycle_name}_tracks.png", 
+                   bbox_inches='tight', dpi=300)
+        plt.close()
+    else:
+        plt.show()
+
 def filter_matches_graph(frames, matches_dict, features_data_t, threshold=0.6, distance_threshold=10.0, inlier_ratio_threshold=0.8, verbose=True, output_csv=None):
     """
     基于图结构的匹配过滤函数，去除不一致的匹配及靠近不一致匹配的点对。
     
     Args:
         frames: 图像路径列表
-        matches_dict: 匹配字典 {key1-key2: matches}
+        matches_dict: 匹配字典 {key1-key2: matches} idxs:matches[0] match_scores:matches[1]
         features_data: 特征数据字典
         threshold: 循环一致性过滤阈值
         distance_threshold: 空间邻近过滤的距离阈值（像素）
@@ -436,12 +717,29 @@ def filter_matches_graph(frames, matches_dict, features_data_t, threshold=0.6, d
         
     # 新字典去除matches_dict中的分数
     filtered_matches_dict = {}
+    filtered_scores_dict = {}
     for key_pair, matches in matches_dict.items():
         if len(matches) > 0:
             filtered_matches_dict[key_pair] = matches[0]
+            filtered_scores_dict[key_pair] = matches[1]
             # 记录初始匹配数
             stats["初始"][key_pair] = len(matches[0])
     
+    # # 过滤匹配
+    # filtered_matches_dict = filter_matches_comprehensive(
+    #     filtered_matches_dict,
+    #     features_data,
+    #     filtered_scores_dict,
+    #     min_matches=15
+    # )
+
+    stats = defaultdict(dict)
+    for key_pair, matches in filtered_matches_dict.items():
+        if len(matches) > 0:
+            # 记录初始匹配数
+            stats["初始"][key_pair] = len(matches[0])
+    
+
     # return filtered_matches_dict, None
     # 构建图像之间的连接图
     G = nx.Graph()
@@ -496,6 +794,7 @@ def filter_matches_graph(frames, matches_dict, features_data_t, threshold=0.6, d
             # 构建匹配索引查找表
             match_maps = []
             pair_keys = []
+            is_reverse_lst = []
             
             # 记录每对之间的匹配数量
             pair_match_counts = []
@@ -513,6 +812,7 @@ def filter_matches_graph(frames, matches_dict, features_data_t, threshold=0.6, d
                     is_reverse = True
                     pair_keys.append(reverse_key)
                 
+                is_reverse_lst.append(is_reverse)
                 pair_match_counts.append(len(matches))
                 
                 # 创建从idx1到idx2的映射以及索引映射（用于掩码）
@@ -530,8 +830,12 @@ def filter_matches_graph(frames, matches_dict, features_data_t, threshold=0.6, d
             
             # === Step 1: 批量读取第一对匹配 ===
             matches0 = np.array(filtered_matches_dict[pair_keys[0]], dtype=int)  # shape: (N, 2)
-            idx1_arr = matches0[:, 0]
-            idx2_arr = matches0[:, 1]
+            if is_reverse_lst[0]:
+                idx1_arr = matches0[:, 1]
+                idx2_arr = matches0[:, 0]
+            else:
+                idx1_arr = matches0[:, 0]
+                idx2_arr = matches0[:, 1]
 
             # === Step 2: 映射 idx2 -> idx3 和 idx3 -> idx1_cycle ===
             idx3_arr = np.array([match_maps[1].get(idx2, -1) for idx2 in idx2_arr])
@@ -558,9 +862,21 @@ def filter_matches_graph(frames, matches_dict, features_data_t, threshold=0.6, d
             # 计算循环误差均值
             if len(distances) > 0:
                 mean_cycle_error = np.mean(distances)
-                
+                #another_et_another_et005.png-another_et_another_et004.png-another_et_another_et001.png
                 # 如果循环误差过大，移除该三元组中匹配数量最少的匹配对
-                if mean_cycle_error > 60 and (max(pair_match_counts) - min(pair_match_counts) > 100):
+
+                # # 在filter_matches_graph函数中添加调用
+                # # 在处理循环时添加：
+                # if 'another_et_another_et005.png-another_et_another_et004.png-another_et_another_et001.png' in cycle_name:
+                #     visualize_cycle_consistency(cycle_name, frames, filtered_matches_dict, features_data, 
+                #                             output_dir='cycle_visualization')
+                    
+                #     # 添加轨迹可视化
+                #     visualize_cycle_consistency_with_tracks(cycle_name, frames, filtered_matches_dict, 
+                #                                         features_data, output_dir='cycle_visualization')
+    
+
+                if mean_cycle_error > 25:
                     # 找出三对匹配中数量最少的一对
                     min_match_count = min(pair_match_counts)
                     min_match_idx = pair_match_counts.index(min_match_count)
@@ -852,6 +1168,476 @@ def filter_matches_graph(frames, matches_dict, features_data_t, threshold=0.6, d
             print(line)
     
     return filtered_matches_dict, cycle_error_data
+
+def enhanced_filter_matches_graph(frames, matches_dict, features_data_t, 
+                                 score_threshold=0.6, cycle_error_threshold=5.0,
+                                 max_iterations=10, verbose=True):
+    """
+    增强型匹配过滤函数，基于三元组循环一致性进行匹配过滤，然后以高质量三元组作为种子扩展匹配组。
+    
+    Args:
+        frames: 图像路径列表
+        matches_dict: 匹配字典 {key1-key2: [match_indices, match_scores]}
+        features_data_t: 特征数据字典
+        score_threshold: 匹配分数阈值，高于此分数的匹配被认为是可靠的
+        cycle_error_threshold: 循环误差阈值（像素），低于此值的循环被认为是一致的
+        max_iterations: 最大迭代次数
+        verbose: 是否输出详细统计信息
+        
+    Returns:
+        filtered_matches_dict: 过滤后的匹配字典
+        cycle_error_data: 循环误差数据
+    """
+    import numpy as np
+    import networkx as nx
+    from collections import defaultdict
+    import copy
+    import heapq
+    
+    # 复制特征数据和匹配字典
+    features_data_t = copy.deepcopy(features_data_t)
+    features_data = {k: {"kp": v['kp'].cpu().numpy()} for k, v in features_data_t.items()}
+    matches_dict_copy = copy.deepcopy(matches_dict)
+    
+    # 统计信息
+    stats = defaultdict(dict)
+    for key_pair, matches in matches_dict_copy.items():
+        if len(matches) > 0:
+            stats["初始"][key_pair] = len(matches[0])
+    
+    # 分离匹配索引和匹配分数
+    filtered_matches_dict = {}
+    filtered_scores_dict = {}
+    for key_pair, matches in matches_dict_copy.items():
+        if len(matches) > 0:
+            filtered_matches_dict[key_pair] = matches[0]
+            filtered_scores_dict[key_pair] = matches[1]
+    
+    # 1. 构建图像连接图
+    G = nx.Graph()
+    for key_pair, matches in filtered_matches_dict.items():
+        key1, key2 = key_pair.split('-')
+        if len(matches) > 0:
+            # 使用匹配数量作为权重
+            G.add_edge(key1, key2, weight=len(matches))
+    
+    # 2. 计算所有三元组的循环误差
+    cycle_quality_map = {}  # {cycle_name: {"error": float, "pairs": [pair1, pair2, pair3]}}
+    
+    # 查找所有长度为3的循环
+    for cycle in nx.cycle_basis(G):
+        if len(cycle) == 3:
+            # 获取三对匹配关系
+            keys = cycle
+            pairs = [
+                (keys[0], keys[1]),
+                (keys[1], keys[2]),
+                (keys[2], keys[0])
+            ]
+            
+            cycle_name = f"{keys[0]}-{keys[1]}-{keys[2]}"
+            
+            # 检查所有匹配对是否存在
+            valid_cycle = True
+            pair_keys = []
+            
+            for key1, key2 in pairs:
+                pair_key = f"{key1}-{key2}"
+                reverse_key = f"{key2}-{key1}"
+                
+                if pair_key in filtered_matches_dict:
+                    pair_keys.append(pair_key)
+                elif reverse_key in filtered_matches_dict:
+                    pair_keys.append(reverse_key)
+                else:
+                    valid_cycle = False
+                    break
+            
+            if not valid_cycle:
+                continue
+            
+            # 计算循环误差
+            mean_cycle_error = calculate_cycle_error(keys, pair_keys, filtered_matches_dict, features_data)
+            
+            if mean_cycle_error is not None:
+                cycle_quality_map[cycle_name] = {
+                    "error": mean_cycle_error,
+                    "pairs": pair_keys,
+                    "nodes": keys
+                }
+    
+    # 3. 按循环误差排序
+    sorted_cycles = sorted(cycle_quality_map.items(), key=lambda x: x[1]["error"])
+    
+    # 4. 迭代筛选过程
+    reliable_matches = set()  # 存储可靠匹配对
+    processed_cycles = set()  # 已处理的循环
+    
+    # 如果没有循环，则返回原始匹配
+    if not sorted_cycles:
+        if verbose:
+            print("未发现有效循环，返回原始匹配")
+        return filtered_matches_dict, None
+    
+    # 依次处理每个循环三元组作为种子
+    for cycle_name, cycle_data in sorted_cycles:
+        # 如果循环已处理，跳过
+        if cycle_name in processed_cycles:
+            continue
+        
+        # 如果循环误差太大，跳过
+        if cycle_data["error"] > cycle_error_threshold * 2:
+            continue
+        
+        # 将该循环标记为已处理
+        processed_cycles.add(cycle_name)
+        
+        # 如果循环误差小于阈值，将其包含的匹配对加入可靠匹配集合
+        if cycle_data["error"] <= cycle_error_threshold:
+            for pair in cycle_data["pairs"]:
+                reliable_matches.add(pair)
+            
+            # 以该三元组为种子，扩展匹配组
+            current_group = set(cycle_data["nodes"])  # 当前组中的节点
+            current_pairs = set(cycle_data["pairs"])  # 当前组中的匹配对
+            
+            # 迭代扩展，尝试添加与当前组构成循环的匹配对
+            for _ in range(max_iterations):
+                expanded = False
+                
+                # 1. 先寻找能与当前组中的节点构成新三元组的匹配对
+                potential_cycles = []
+                
+                for node1 in current_group:
+                    for node2 in current_group:
+                        if node1 != node2:
+                            # 检查所有与这两个节点相连的其他节点
+                            for node3 in G.nodes():
+                                if node3 not in current_group and G.has_edge(node1, node3) and G.has_edge(node2, node3):
+                                    new_cycle = [node1, node2, node3]
+                                    new_cycle_name = "-".join(sorted(new_cycle))
+                                    
+                                    if new_cycle_name in cycle_quality_map and new_cycle_name not in processed_cycles:
+                                        cycle_error = cycle_quality_map[new_cycle_name]["error"]
+                                        if cycle_error <= cycle_error_threshold:
+                                            potential_cycles.append((cycle_error, new_cycle_name))
+                
+                # 按循环误差排序
+                potential_cycles.sort()
+                
+                # 尝试添加最佳循环
+                if potential_cycles:
+                    _, best_cycle_name = potential_cycles[0]
+                    best_cycle_data = cycle_quality_map[best_cycle_name]
+                    
+                    # 将新循环的节点和匹配对添加到当前组
+                    current_group.update(best_cycle_data["nodes"])
+                    for pair in best_cycle_data["pairs"]:
+                        current_pairs.add(pair)
+                        reliable_matches.add(pair)
+                    
+                    processed_cycles.add(best_cycle_name)
+                    expanded = True
+                
+                # 2. 如果没有找到合适的循环，尝试添加与当前组中节点的高分数匹配
+                if not expanded:
+                    best_score = -1
+                    best_pair = None
+                    
+                    for node in current_group:
+                        for neighbor in G.neighbors(node):
+                            if neighbor not in current_group:
+                                pair_key = f"{node}-{neighbor}"
+                                reverse_key = f"{neighbor}-{node}"
+                                
+                                if pair_key in filtered_matches_dict:
+                                    key_to_check = pair_key
+                                elif reverse_key in filtered_matches_dict:
+                                    key_to_check = reverse_key
+                                else:
+                                    continue
+                                
+                                # 计算该匹配对的平均分数
+                                if key_to_check in filtered_scores_dict:
+                                    avg_score = np.mean(filtered_scores_dict[key_to_check])
+                                    if avg_score > best_score and avg_score >= score_threshold:
+                                        best_score = avg_score
+                                        best_pair = key_to_check
+                    
+                    # 如果找到高分数匹配，添加到可靠匹配集合
+                    if best_pair is not None:
+                        node1, node2 = best_pair.split('-')
+                        reliable_matches.add(best_pair)
+                        current_pairs.add(best_pair)
+                        current_group.add(node1)
+                        current_group.add(node2)
+                        expanded = True
+                
+                # 如果无法继续扩展，退出循环
+                if not expanded:
+                    break
+    
+    # 5. 构建最终过滤结果
+    final_matches_dict = {}
+    for pair in reliable_matches:
+        if pair in filtered_matches_dict:
+            final_matches_dict[pair] = filtered_matches_dict[pair]
+    
+    # 统计信息
+    stats["最终"] = {pair: len(final_matches_dict[pair]) for pair in final_matches_dict}
+    
+    if verbose:
+        print(f"\n增强型匹配过滤统计摘要:")
+        print(f"共处理 {len(matches_dict_copy)} 对匹配")
+        print(f"可靠匹配: {len(final_matches_dict)} 对")
+        print(f"过滤比例: {(len(matches_dict_copy) - len(final_matches_dict)) / len(matches_dict_copy) * 100:.1f}%")
+        
+        # 打印每个阶段的匹配数量变化
+        print(f"\n各阶段匹配数量变化:")
+        all_pairs = set()
+        for stage in stats:
+            all_pairs.update(stats[stage].keys())
+        
+        stages = list(stats.keys())
+        header = "匹配对        "
+        for stage in stages:
+            header += f" | {stage}"
+        print(header)
+        print("-" * len(header))
+        
+        sorted_pairs = sorted(all_pairs)
+        for pair in sorted_pairs:
+            line = f"{pair:12}"
+            for stage in stages:
+                value = stats[stage].get(pair, "-")
+                line += f" | {value:6}"
+            print(line)
+    
+    return final_matches_dict, cycle_quality_map
+
+
+def calculate_cycle_error(nodes, pair_keys, matches_dict, features_data):
+    """
+    计算三元组的平均循环误差
+    
+    Args:
+        nodes: 三元组中的节点 [node1, node2, node3]
+        pair_keys: 三元组中的匹配对键 [pair1, pair2, pair3]
+        matches_dict: 匹配字典
+        features_data: 特征数据字典
+        
+    Returns:
+        mean_cycle_error: 平均循环误差
+    """
+    import numpy as np
+    
+    # 创建匹配索引查找表
+    match_maps = []
+    is_reverse_lst = []
+    
+    for i, pair_key in enumerate(pair_keys):
+        key1, key2 = pair_key.split('-')
+        matches = matches_dict[pair_key]
+        
+        # 判断是否需要反转匹配
+        if key1 == nodes[i] and key2 == nodes[(i+1)%3]:
+            is_reverse = False
+        else:
+            is_reverse = True
+        
+        is_reverse_lst.append(is_reverse)
+        
+        # 创建从idx1到idx2的映射
+        if is_reverse:
+            match_map = {int(m[1]): int(m[0]) for m in matches}
+        else:
+            match_map = {int(m[0]): int(m[1]) for m in matches}
+        
+        match_maps.append(match_map)
+    
+    # 批量读取第一对匹配
+    matches0 = np.array(matches_dict[pair_keys[0]], dtype=int)
+    if is_reverse_lst[0]:
+        idx1_arr = matches0[:, 1]
+        idx2_arr = matches0[:, 0]
+    else:
+        idx1_arr = matches0[:, 0]
+        idx2_arr = matches0[:, 1]
+    
+    # 映射 idx2 -> idx3 和 idx3 -> idx1_cycle
+    idx3_arr = np.array([match_maps[1].get(idx2, -1) for idx2 in idx2_arr])
+    valid_1 = idx3_arr != -1
+    
+    idx1_cycle_arr = np.array([match_maps[2].get(idx3, -1) if valid else -1
+                              for idx3, valid in zip(idx3_arr, valid_1)])
+    valid_2 = idx1_cycle_arr != -1
+    
+    valid = valid_1 & valid_2
+    
+    if not np.any(valid):
+        return None
+    
+    # 加载关键点坐标
+    kp1 = np.array(features_data[nodes[0]]['kp'])
+    pt1 = kp1[idx1_arr[valid]]
+    pt1_cycle = kp1[idx1_cycle_arr[valid]]
+    
+    # 计算距离和循环误差均值
+    distances = np.linalg.norm(pt1 - pt1_cycle, axis=1)
+    
+    if len(distances) > 0:
+        return np.mean(distances)
+    else:
+        return None
+    
+def filter_matches_comprehensive(matches_dict, features_data, scores_dict, min_matches=15):
+    """
+    综合过滤策略，包含:
+    1. 基于聚类的离群点检测
+    2. 基于图连通性的稀疏匹配过滤
+    3. 基于局部结构一致性的过滤
+    4. 基于匹配分数的自适应阈值过滤
+    
+    Args:
+        matches_dict: {pair_key: matches} 匹配字典
+        features_data: 特征点信息
+        scores_dict: {pair_key: scores} 匹配分数
+        min_matches: 最小保留匹配数
+    """
+    filtered_dict = matches_dict.copy()
+    
+    # 1. 构建图结构分析连通性
+    G = nx.Graph()
+    for pair_key, matches in matches_dict.items():
+        key1, key2 = pair_key.split('-')
+        G.add_edge(key1, key2, weight=len(matches))
+    
+    # 2. 对每对匹配进行过滤
+    for pair_key in list(filtered_dict.keys()):
+        matches = filtered_dict[pair_key]
+        if len(matches) < min_matches:
+            continue
+            
+        key1, key2 = pair_key.split('-')
+        kpts1 = features_data[key1]['kp']
+        kpts2 = features_data[key2]['kp']
+        scores = scores_dict[pair_key]
+        
+        # 2.1 聚类过滤
+        filtered_indices = cluster_based_filtering(
+            kpts1[matches[:, 0]], 
+            kpts2[matches[:, 1]], 
+            scores
+        )
+        
+        if len(filtered_indices) < min_matches:
+            del filtered_dict[pair_key]
+            continue
+            
+        # # 2.2 局部结构一致性检查
+        # filtered_indices = check_local_structure(
+        #     kpts1[matches[filtered_indices, 0]],
+        #     kpts2[matches[filtered_indices, 1]],
+        #     scores[filtered_indices]
+        # )
+        
+        # if len(filtered_indices) < min_matches:
+        #     del filtered_dict[pair_key]
+        #     continue
+            
+        # 2.3 自适应分数阈值过滤
+        score_threshold = adaptive_score_threshold(scores[filtered_indices])
+        final_indices = filtered_indices[scores[filtered_indices] > score_threshold]
+        
+        if len(final_indices) < min_matches:
+            del filtered_dict[pair_key]
+        else:
+            filtered_dict[pair_key] = matches[final_indices]
+    
+    return filtered_dict
+
+def cluster_based_filtering(pts1, pts2, scores, eps=None, min_samples=3):
+    """基于DBSCAN聚类的离群点检测"""
+    # 计算匹配点位移向量
+    motions = pts2 - pts1
+    
+    # 自适应确定eps
+    if eps is None:
+        pts_range = np.max(motions, axis=0) - np.min(motions, axis=0)
+        eps = np.mean(pts_range) * 0.1
+    
+    # DBSCAN聚类
+    clustering = DBSCAN(eps=eps, min_samples=min_samples).fit(motions)
+    labels = clustering.labels_
+    
+    # 找出最大聚类
+    if len(np.unique(labels)) > 1:  # 存在多个聚类
+        # 结合分数权重选择主要聚类
+        clusters = []
+        for label in range(labels.max() + 1):
+            mask = (labels == label)
+            avg_score = np.mean(scores[mask])
+            size = np.sum(mask)
+            clusters.append((label, size * avg_score))
+        
+        main_cluster = max(clusters, key=lambda x: x[1])[0]
+        return np.where(labels == main_cluster)[0]
+    else:
+        return np.arange(len(pts1))
+
+def check_local_structure(pts1, pts2, scores, radius=30):
+    """检查局部结构一致性"""
+    valid_indices = []
+    
+    for i in range(len(pts1)):
+        # 找出局部邻域内的点
+        dist1 = np.linalg.norm(pts1 - pts1[i], axis=1)
+        neighbors1 = np.where(dist1 < radius)[0]
+        
+        dist2 = np.linalg.norm(pts2 - pts2[i], axis=1)
+        neighbors2 = np.where(dist2 < radius)[0]
+        
+        if len(neighbors1) < 3 or len(neighbors2) < 3:
+            continue
+            
+        # 计算局部结构相似度
+        structure1 = compute_local_structure(pts1[neighbors1])
+        structure2 = compute_local_structure(pts2[neighbors2])
+        
+        if structure_similarity(structure1, structure2) > 0.7:
+            valid_indices.append(i)
+    
+    return np.array(valid_indices)
+
+def compute_local_structure(pts):
+    """计算点集的局部结构特征"""
+    # 使用相对角度和距离比作为结构特征
+    center = np.mean(pts, axis=0)
+    vectors = pts - center
+    angles = np.arctan2(vectors[:, 1], vectors[:, 0])
+    distances = np.linalg.norm(vectors, axis=1)
+    
+    # 归一化距离
+    distances = distances / np.max(distances)
+    
+    return np.column_stack([angles, distances])
+
+def structure_similarity(s1, s2):
+    """计算两个局部结构的相似度"""
+    if len(s1) != len(s2):
+        return 0
+    
+    # 计算角度差异和距离比差异
+    angle_diff = np.min(np.abs(s1[:, 0][:, None] - s2[:, 0]))
+    dist_diff = np.mean(np.abs(s1[:, 1] - s2[:, 1]))
+    
+    return np.exp(-(angle_diff + dist_diff))
+
+def adaptive_score_threshold(scores):
+    """自适应确定分数阈值"""
+    mean_score = np.mean(scores)
+    std_score = np.std(scores)
+    return mean_score - 0.5 * std_score
 
 def check_cycle_consistency(keys, matches_dict, features_data):
     """

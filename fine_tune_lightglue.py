@@ -122,7 +122,7 @@ def create_spliced_negative_pair(image_paths, img_idx, splice_ratio_range=(0.3, 
     return img1, img2, transform
 
 class AugmentedImagePairDataset(Dataset):
-    def __init__(self, image_paths, num_pairs_per_image=5, color_change_prob=0.3, copy_paste_prob=0.8, negative_sample_prob=0.3):
+    def __init__(self, image_paths, num_pairs_per_image=5, color_change_prob=0.3, copy_paste_prob=0, negative_sample_prob=0):
         self.image_paths = image_paths
         self.num_pairs_per_image = num_pairs_per_image
         self.color_change_prob = color_change_prob
@@ -349,7 +349,23 @@ class AugmentedImagePairDataset(Dataset):
             
             img1 = img1_batch.squeeze(0)
             img2 = img2_batch.squeeze(0)
-                
+
+        valid_mask1_batch = img1[0] > 0 
+        valid_mask2_batch = img2[0] > 0 
+        # 创建边界区域掩码（有效区域内缩30像素）
+        kernel_size = 61  # 2*30+1
+        padding = 30
+        valid_mask1_inner = F.avg_pool2d(
+            F.pad(valid_mask1_batch[None,None].float(), (padding, padding, padding, padding), mode='constant', value=0),
+            kernel_size=kernel_size, stride=1, padding=0
+        )
+        valid_mask2_inner = F.avg_pool2d(
+            F.pad(valid_mask2_batch[None,None].float(), (padding, padding, padding, padding), mode='constant', value=0),
+            kernel_size=kernel_size, stride=1, padding=0
+        )
+        valid_mask1_inner = valid_mask1_inner[0,0] > 0.99
+        valid_mask2_inner = valid_mask2_inner[0,0] > 0.99
+
         return {
             'image0': img1,
             'image1': img2, 
@@ -363,6 +379,8 @@ class AugmentedImagePairDataset(Dataset):
             'copy_paste_applied': apply_copy_paste,
             'src_copy_mask': src_copy_mask,
             'dst_copy_mask': dst_copy_mask,
+            'valid_mask0_inner': valid_mask1_inner,
+            'valid_mask1_inner': valid_mask2_inner,
             'is_negative_pair': is_negative_pair
         }
 
@@ -487,17 +505,29 @@ def get_loss(model, pred, data):
 
     return losses
 
-def get_gt(data, batch_size, device, distance_threshold=1):
+def get_gt(data, batch_size, device, distance_threshold=2):
     match_matrix = torch.full((batch_size, 2048 + 1, 512 + 1), 0., device=device, dtype=data['keypoints0'][0].dtype)
     
     for b in range(batch_size):
         keypoints0 = data['keypoints0'][b]
         keypoints1 = data['keypoints1'][b]
         is_negative = data['is_negative_pair'][b]
+        valid_mask0_inner = data['valid_mask0_inner'][b].to(device)
+        valid_mask1_inner = data['valid_mask1_inner'][b].to(device)
         N0, N1 = keypoints0.shape[0], keypoints1.shape[0]
         
         # # 检查是否为负样本对
         # is_negative = data.get('is_negative_pair', False)
+	        # 检查点是否在有效区域内
+        kpts0_valid = valid_mask0_inner[
+            keypoints0[:, 1].long().clamp(0, valid_mask0_inner.shape[0]-1),
+            keypoints0[:, 0].long().clamp(0, valid_mask0_inner.shape[1]-1)
+        ]
+        kpts1_valid = valid_mask1_inner[
+            keypoints1[:, 1].long().clamp(0, valid_mask1_inner.shape[0]-1),
+            keypoints1[:, 0].long().clamp(0, valid_mask1_inner.shape[1]-1)
+        ]
+        
         
         if is_negative:
             # 对于负样本，所有keypoints0都标记为不匹配
@@ -509,6 +539,7 @@ def get_gt(data, batch_size, device, distance_threshold=1):
                 match_matrix[b, N0, j] = 1.0
                 
         else:
+
             # 检查是否应用了颜色变换，将对应区域的匹配点标记为不匹配
             if data.get('color_change_applied', False) and data.get('color_change_mask') is not None:
                 color_mask = data['color_change_mask'][b]
@@ -589,6 +620,8 @@ def get_gt(data, batch_size, device, distance_threshold=1):
                 else:
                     match_matrix[b, i, N1] = 1.0  # 不匹配
         
+        match_matrix[b][:-1] *= kpts0_valid.float()[:,None]
+        match_matrix[b][:,:-1] *= kpts1_valid.float()[None,:]
     data["gt_matches0"] = (0.5 - match_matrix[:, :, -1]) / 0.5
     data["gt_matches1"] = (0.5 - match_matrix[:, -1, :]) / 0.5
     data["gt_assignment"] = match_matrix
@@ -668,10 +701,10 @@ def visualize_matches(image0, image1, kpts0, kpts1, matches, confidence, correct
         x2, y2 = kpts1[m]
         
         # 确定线条颜色
-        # if correct_matches is not None:
-        #     color = 'green' if correct_matches[i] else 'red'
-        # else:
-        color = cmap(norm(confidence[i]))
+        if correct_matches is not None:
+            color = 'green' if correct_matches[i] else 'red'
+        else:
+            color = cmap(norm(confidence[i]))
         
         # 绘制匹配线
         con = patches.ConnectionPatch(
@@ -690,7 +723,7 @@ def visualize_matches(image0, image1, kpts0, kpts1, matches, confidence, correct
     else:
         plt.show()
 
-def check_match_correctness(kpts0, kpts1, matches, transform, threshold=3.0):
+def check_match_correctness(kpts0, kpts1, matches, transform, threshold=1.5):
     """
     检查匹配是否正确，基于已知的变换矩阵
     
@@ -736,13 +769,13 @@ def check_match_correctness(kpts0, kpts1, matches, transform, threshold=3.0):
     
     return full_correctness
 
-def fine_tune_lightglue(lightglue_matcher, images, feature_dir, device, epochs=5, batch_size=16, num_pairs_per_image=5, learning_rate=1e-5):
+def fine_tune_lightglue(lightglue_matcher, images, feature_dir, device, epochs=5, batch_size=16, num_pairs_per_image=1, learning_rate=1e-5):
     """对LightGlue进行自监督微调，使用批处理和半精度"""
     print(f"开始对LightGlue进行高效自监督微调 ({len(images)}张图像)")
     
     # 获取模型引用
-    matcher = lightglue_matcher.model
-    extractor = lightglue_matcher.detector
+    matcher = copy.deepcopy(lightglue_matcher.model)
+    extractor = copy.deepcopy(lightglue_matcher.detector)
 
     accumulation_steps_ori = len(images)*num_pairs_per_image / (30 * batch_size)
     accumulation_steps = max(1, int(accumulation_steps_ori))  # 确保至少为1
@@ -790,11 +823,14 @@ def fine_tune_lightglue(lightglue_matcher, images, feature_dir, device, epochs=5
     # 保存一个固定的评估样本，用于跨epoch比较
     eval_batch = None
     
+    finetune_num = 0
     for epoch in range(epochs):
         epoch_loss = 0.0
         batch_count = 0
         optimizer.zero_grad()
 
+        if finetune_num > 15:
+            break
         print(f"Epoch {epoch+1}/{epochs}")
         progress_bar = tqdm.tqdm(dataloader)
         
@@ -802,7 +838,10 @@ def fine_tune_lightglue(lightglue_matcher, images, feature_dir, device, epochs=5
             # 保存第一个批次作为评估样本（仅第一个epoch）：
             if epoch == 0 and batch_idx == 0 and eval_batch is None:
                 eval_batch = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
-                
+            
+            finetune_num += 1
+            if finetune_num > 15:
+                break
             # 将数据移动到设备并转换为半精度
             imgs0 = batch['image0'].to(device)
             imgs1 = batch['image1'].to(device)
@@ -838,6 +877,8 @@ def fine_tune_lightglue(lightglue_matcher, images, feature_dir, device, epochs=5
                 'image_size1': img_sizes1,
                 'transform0': transforms0,
                 'transform1': transforms1,
+                'valid_mask0_inner': batch['valid_mask0_inner'],
+                'valid_mask1_inner': batch['valid_mask1_inner'],
                 'is_negative_pair':batch['is_negative_pair']
             }
             

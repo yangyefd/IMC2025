@@ -2474,40 +2474,45 @@ def match_with_gimlightglue_ensemble(lightglue_matcher, img_fnames, index_pairs,
                 'scale1': torch.stack([data['scale1'] for data in batch_data_alike], dim=0).to(device),
             }
 
-            if run_pairs > 10 and (success_pairs / run_pairs < 0.5) and not lg_finetuned and (run_pairs / len(batch_pairs_lst) < 0.5):
-                print("Finetuning LightGlue matcher...")
-                lg_finetuned = True
-                # try:
-                #     # 3. 微调LightGlue
-                #     t = time()
-                #     fine_tuned_matcher = fine_tune_lightglue(
-                #         lightglue_matcher,
-                #         img_fnames, 
-                #         feature_dir, 
-                #         device,
-                #         batch_size=8,
-                #         epochs=2
-                #     )
-                #     lightglue_matcher.update_model(fine_tuned_matcher)
-                #     print(f'模型微调完成，耗时 {time() - t:.4f} sec')
-                # except Exception as e:
-                #     print(f"微调LightGlue失败: {e}")
+            # if run_pairs > 10 and (success_pairs / run_pairs < 0.5) and not lg_finetuned and (run_pairs / len(batch_pairs_lst) < 0.5):
+            #     print("Finetuning LightGlue matcher...")
+            #     lg_finetuned = True
+            if not lg_finetuned:
+                try:
+                    # 3. 微调LightGlue
+                    t = time()
+                    fine_tuned_matcher = fine_tune_lightglue(
+                        lightglue_matcher,
+                        img_fnames, 
+                        feature_dir, 
+                        device,
+                        batch_size=8,
+                        epochs=2
+                    )
+                    # lightglue_matcher.update_model(fine_tuned_matcher)
+                    print(f'模型微调完成，耗时 {time() - t:.4f} sec')
+                    lg_finetuned = True
+                except Exception as e:
+                    print(f"微调LightGlue失败: {e}")
+
 
             # 批量推理
             with torch.inference_mode():
                 batch_dists, batch_idxs = lightglue_matcher.match_batch(batch_preds)
+                batch_dists_fine, batch_idxs_fine = lightglue_matcher.match_batch_model(batch_preds,fine_tuned_matcher)
                 # batch_dists, batch_idxs = lg_forward(lg_matcher, batch_preds_alike['descriptors0'].float(), batch_preds_alike['descriptors1'].float(),
                 #         KF.laf_from_center_scale_ori(batch_preds_alike['keypoints0'].float()),
                 #         KF.laf_from_center_scale_ori(batch_preds_alike['keypoints1'].float()))
                 # batch_idxs += 4096
-                
+            
             # 对 batch_idxs 按照 batch_dists 分数排序并保留最大的 1500 个匹配
             sorted_idxs = []
             sorted_dists = []
             for i in range(len(batch_dists)):
                 if len(batch_dists[i]) > 0:
-                    dists = batch_dists[i]
-                    idxs = batch_idxs[i]
+                    dists = torch.cat([batch_dists[i],batch_dists_fine[i]])
+                    idxs = torch.cat([batch_idxs[i],batch_idxs_fine[i]])
+                    dists[i], idxs[i] = match_nms(dists[i], idxs[i], batch_info[i], features_data, 1)
                     sorted_indices = torch.argsort(dists, descending=True)
                     sorted_dists_one = dists[sorted_indices]
                     sorted_idxs_one = idxs[sorted_indices]
@@ -4357,8 +4362,8 @@ if is_OneTest:
     ]
 else:
     dataset_train_test_lst = [
-        # 'ETs',
-        'stairs'
+        'ETs',
+        # 'stairs'
         # 'imc2023_heritage'
     ]
     
@@ -4383,7 +4388,7 @@ for dataset, predictions in samples.items():
     feature_dir = os.path.join(workdir, 'featureout', dataset)
     os.makedirs(feature_dir, exist_ok=True)
 
-    if 0:
+    if 1:
         # try:
         t = time()
         # index_pairs = get_image_pairs_shortlist(images, sim_th=0.3, min_pairs=20, 
@@ -4430,18 +4435,18 @@ for dataset, predictions in samples.items():
         # timings['feature_matching'].append(time() - t)
         # print(f'Features matched in {time() - t:.4f} sec')
 
-        # 3. 微调LightGlue
-        t = time()
-        fine_tuned_matcher = fine_tune_lightglue(
-            lightglue_matcher,
-            images, 
-            feature_dir, 
-            device,
-            batch_size=8,
-            epochs=2
-        )
-        lightglue_matcher.update_model(fine_tuned_matcher)
-        print(f'模型微调完成，耗时 {time() - t:.4f} sec')
+        # # 3. 微调LightGlue
+        # t = time()
+        # fine_tuned_matcher = fine_tune_lightglue(
+        #     lightglue_matcher,
+        #     images, 
+        #     feature_dir, 
+        #     device,
+        #     batch_size=4,
+        #     epochs=1
+        # )
+        # lightglue_matcher.update_model(fine_tuned_matcher)
+        # print(f'模型微调完成，耗时 {time() - t:.4f} sec')
         
 
         t = time()
@@ -4479,8 +4484,8 @@ for dataset, predictions in samples.items():
         # key = "stairs_split_1_1710453930259.png"  # 你想作为中心的图像关键字
         # visualize_connections(key, filtered_matches_dict, features_data, images, "connections_viz")
 
-        # # # 可视化过滤结果
-        # visualize_filtered_matches(images, matches_dict, filtered_matches_dict, features_data, os.path.join(feature_dir, 'graph_results'))
+        # # 可视化过滤结果
+        visualize_filtered_matches(images, matches_dict, filtered_matches_dict, features_data, os.path.join(feature_dir, 'graph_results'))
         
         import shutil
         # 备份原始 matches.h5 文件（如果存在）
