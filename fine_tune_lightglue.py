@@ -28,8 +28,8 @@ import matplotlib
 from losses import NLLLoss
 matplotlib.use('Agg')  # 无界面后端，适合在服务器上运行
 
-IMAGE_SIZE = (800,800)
-kaggle_run = False
+IMAGE_SIZE = (1024,1024)
+kaggle_run = True
 
 def create_spliced_negative_pair(image_paths, img_idx, splice_ratio_range=(0.3, 0.5)):
     """
@@ -122,17 +122,17 @@ def create_spliced_negative_pair(image_paths, img_idx, splice_ratio_range=(0.3, 
     return img1, img2, transform
 
 class AugmentedImagePairDataset(Dataset):
-    def __init__(self, image_paths, num_pairs_per_image=5, color_change_prob=0.3, copy_paste_prob=0, negative_sample_prob=0):
+    def __init__(self, image_paths, size=IMAGE_SIZE,num_pairs_per_image=5, color_change_prob=0.3, copy_paste_prob=0, negative_sample_prob=0):
         self.image_paths = image_paths
         self.num_pairs_per_image = num_pairs_per_image
         self.color_change_prob = color_change_prob
         self.copy_paste_prob = copy_paste_prob  # 新增复制粘贴概率参数
         self.negative_sample_prob = negative_sample_prob  # 新增负样本概率参数
-
+        self.image_size = size
         # 基础变换
         self.color_jitter = K.ColorJitter(0.3, 0.3, 0.3, 0.1, p=0)
         self.perspective = K.RandomPerspective(0.4, p=0.7)
-        self.affine = K.RandomAffine(degrees=180, translate=(0.1, 0.1), scale=(0.8, 1.2), p=0.7)
+        self.affine = K.RandomAffine(degrees=180, translate=(0, 0), scale=(0.95, 1.2), p=0.7)
         self.blur = K.RandomGaussianBlur((5, 9), (0.1, 2.0), p=0.5)
         
         # 添加区域颜色变换
@@ -303,7 +303,7 @@ class AugmentedImagePairDataset(Dataset):
             # }
         else:
             # 加载原始图像
-            original_img = load_torch_image(img_path)
+            original_img = load_torch_image(img_path, self.image_size)
             img1 = original_img.clone()
             img2 = original_img.clone()
             
@@ -312,9 +312,9 @@ class AugmentedImagePairDataset(Dataset):
             img2_batch = img2.unsqueeze(0)
             
             # 应用基础变换
-            img1_batch = self.color_jitter(img1_batch)
+            # img1_batch = self.color_jitter(img1_batch)
             img2_batch = self.color_jitter(img2_batch)
-            img1_batch = self.blur(img1_batch)
+            # img1_batch = self.blur(img1_batch)
             img2_batch = self.blur(img2_batch)
             
             # 初始化变换标志和掩码
@@ -340,7 +340,7 @@ class AugmentedImagePairDataset(Dataset):
             affine1_matrix = self.affine.compute_transformation(
                 torch.tensor([[[W/2, H/2]]]), affine1_params, 'bilinear'
             )
-            
+            # affine1_matrix = torch.eye(3).unsqueeze(0).to(img1_batch.device)  # 恒等变换矩阵
             perspective_params = self.perspective.generate_parameters(img2_batch.shape)
             perspective_matrix = self.perspective.compute_transformation(img2_batch, perspective_params, 'bilinear')
             
@@ -350,21 +350,53 @@ class AugmentedImagePairDataset(Dataset):
             img1 = img1_batch.squeeze(0)
             img2 = img2_batch.squeeze(0)
 
+        # valid_mask1_batch = img1[0] > 0 
+        # valid_mask2_batch = img2[0] > 0 
+        # # 创建边界区域掩码（有效区域内缩30像素）
+        # kernel_size = 61  # 2*30+1
+        # padding = 30
+        # valid_mask1_inner = F.avg_pool2d(
+        #     F.pad(valid_mask1_batch[None,None].float(), (padding, padding, padding, padding), mode='constant', value=0),
+        #     kernel_size=kernel_size, stride=1, padding=0
+        # )
+        # valid_mask2_inner = F.avg_pool2d(
+        #     F.pad(valid_mask2_batch[None,None].float(), (padding, padding, padding, padding), mode='constant', value=0),
+        #     kernel_size=kernel_size, stride=1, padding=0
+        # )
+        # valid_mask1_inner = valid_mask1_inner[0,0] > 0.99
+        # valid_mask2_inner = valid_mask2_inner[0,0] > 0.99
+
+
         valid_mask1_batch = img1[0] > 0 
         valid_mask2_batch = img2[0] > 0 
         # 创建边界区域掩码（有效区域内缩30像素）
-        kernel_size = 61  # 2*30+1
-        padding = 30
-        valid_mask1_inner = F.avg_pool2d(
-            F.pad(valid_mask1_batch[None,None].float(), (padding, padding, padding, padding), mode='constant', value=0),
-            kernel_size=kernel_size, stride=1, padding=0
-        )
-        valid_mask2_inner = F.avg_pool2d(
-            F.pad(valid_mask2_batch[None,None].float(), (padding, padding, padding, padding), mode='constant', value=0),
-            kernel_size=kernel_size, stride=1, padding=0
-        )
-        valid_mask1_inner = valid_mask1_inner[0,0] > 0.99
-        valid_mask2_inner = valid_mask2_inner[0,0] > 0.99
+        border_shrink = 30
+
+        # 优化方案3：使用OpenCV的形态学操作（仅CPU执行，需要在torch和numpy之间转换）
+        # 如果在GPU上，需要先转到CPU
+        masks_on_cpu = False
+        if valid_mask1_batch.is_cuda:
+            valid_mask1_np = valid_mask1_batch.cpu().numpy().astype(np.uint8) * 255
+            valid_mask2_np = valid_mask2_batch.cpu().numpy().astype(np.uint8) * 255
+            masks_on_cpu = True
+        else:
+            valid_mask1_np = valid_mask1_batch.numpy().astype(np.uint8) * 255
+            valid_mask2_np = valid_mask2_batch.numpy().astype(np.uint8) * 255
+
+        # 创建腐蚀核
+        kernel = np.ones((2*border_shrink+1, 2*border_shrink+1), np.uint8)
+        # 应用腐蚀操作
+        valid_mask1_np_inner = cv2.erode(valid_mask1_np, kernel, iterations=1)
+        valid_mask2_np_inner = cv2.erode(valid_mask2_np, kernel, iterations=1)
+
+        # 转回torch
+        if masks_on_cpu:
+            valid_mask1_inner = torch.from_numpy(valid_mask1_np_inner > 0).to(valid_mask1_batch.device)
+            valid_mask2_inner = torch.from_numpy(valid_mask2_np_inner > 0).to(valid_mask2_batch.device)
+        else:
+            valid_mask1_inner = torch.from_numpy(valid_mask1_np_inner > 0)
+            valid_mask2_inner = torch.from_numpy(valid_mask2_np_inner > 0)
+
 
         return {
             'image0': img1,
@@ -384,7 +416,7 @@ class AugmentedImagePairDataset(Dataset):
             'is_negative_pair': is_negative_pair
         }
 
-def load_torch_image(image_path, target_size=IMAGE_SIZE):
+def load_torch_image(image_path, target_size):
     """
     加载图像为torch张量，使用以下策略处理图像尺寸：
     - 大于目标尺寸的图像：随机裁剪
@@ -427,6 +459,7 @@ def load_torch_image(image_path, target_size=IMAGE_SIZE):
         
         # 使用较小的比例进行缩放，确保图像完全在目标尺寸内
         ratio = min(width_ratio, height_ratio)
+        ratio = 1
         
         # 计算缩放后的尺寸
         new_width = int(orig_width * ratio)
@@ -505,15 +538,15 @@ def get_loss(model, pred, data):
 
     return losses
 
-def get_gt(data, batch_size, device, distance_threshold=2):
+def get_gt(data, batch_size, device, distance_threshold=5):
     match_matrix = torch.full((batch_size, 2048 + 1, 512 + 1), 0., device=device, dtype=data['keypoints0'][0].dtype)
     
     for b in range(batch_size):
         keypoints0 = data['keypoints0'][b]
         keypoints1 = data['keypoints1'][b]
         is_negative = data['is_negative_pair'][b]
-        valid_mask0_inner = data['valid_mask0_inner'][b].to(device)
-        valid_mask1_inner = data['valid_mask1_inner'][b].to(device)
+        valid_mask0_inner = data['valid_mask0_inner'][b]
+        valid_mask1_inner = data['valid_mask1_inner'][b]
         N0, N1 = keypoints0.shape[0], keypoints1.shape[0]
         
         # # 检查是否为负样本对
@@ -794,8 +827,22 @@ def fine_tune_lightglue(lightglue_matcher, images, feature_dir, device, epochs=5
     # 创建梯度缩放器用于半精度训练
     scaler = GradScaler()
     
+    #遍历所有图像，计算图像的长宽均值
+    image_sizes = []
+    for img_path in images:
+        img = Image.open(img_path).convert('L')
+        image_sizes.append((img.size[0], img.size[1]))
+    avg_width = sum(size[0] for size in image_sizes) / len(image_sizes)
+    avg_height = sum(size[1] for size in image_sizes) / len(image_sizes)
+    avg_size = int(max(avg_width,avg_height)) // 8 * 8 + 32
+    avg_size = avg_size*1.25
+    avg_size = int(avg_size // 8 * 8 + 32)
+    if avg_size > 1600:
+        avg_size = 1600
+    image_sizes = (avg_size, avg_size)
+
     # 创建数据集和数据加载器
-    dataset = AugmentedImagePairDataset(images, num_pairs_per_image)
+    dataset = AugmentedImagePairDataset(images,  size=image_sizes, num_pairs_per_image=num_pairs_per_image)
     dataloader = DataLoader(
         dataset, 
         batch_size=batch_size, 
@@ -877,8 +924,8 @@ def fine_tune_lightglue(lightglue_matcher, images, feature_dir, device, epochs=5
                 'image_size1': img_sizes1,
                 'transform0': transforms0,
                 'transform1': transforms1,
-                'valid_mask0_inner': batch['valid_mask0_inner'],
-                'valid_mask1_inner': batch['valid_mask1_inner'],
+                'valid_mask0_inner': batch['valid_mask0_inner'].to(device),
+                'valid_mask1_inner': batch['valid_mask1_inner'].to(device),
                 'is_negative_pair':batch['is_negative_pair']
             }
             

@@ -685,6 +685,9 @@ def visualize_cycle_consistency_with_tracks(cycle_name, frames, matches_dict, fe
     else:
         plt.show()
 
+# def filter_similarity(frames, matches_dict, features_data_t, threshold=0.6):
+#     #计算每个匹配对的语义相似度：基于匹配对所在位置的patch的相似度，使用clip模型
+
 def filter_matches_graph(frames, matches_dict, features_data_t, threshold=0.6, distance_threshold=10.0, inlier_ratio_threshold=0.8, verbose=True, output_csv=None):
     """
     基于图结构的匹配过滤函数，去除不一致的匹配及靠近不一致匹配的点对。
@@ -710,14 +713,19 @@ def filter_matches_graph(frames, matches_dict, features_data_t, threshold=0.6, d
     import networkx as nx
 
     features_data_t = copy.deepcopy(features_data_t)
-    features_data = {k: {"kp":v['kp'].cpu().numpy()} for k, v in features_data_t.items()}
+    features_data = {k: {"kp":v['kp'].cpu().numpy(),"desc":v['desc'].cpu().numpy()} for k, v in features_data_t.items()}
     
+    #计算描述子距离
+    # torch.cdist(torch.nn.functional.normalize((torch.from_numpy(features_data[key1]['desc'][:]))),torch.nn.functional.normalize((torch.from_numpy(features_data[key2]['desc'][:]))))[matches[:,0],matches[:,1]].mean()
+
     # 记录每个阶段的匹配数量
     stats = defaultdict(dict)
         
     # 新字典去除matches_dict中的分数
     filtered_matches_dict = {}
     filtered_scores_dict = {}
+    #读取LR分类器，对匹配对进行筛选
+
     for key_pair, matches in matches_dict.items():
         if len(matches) > 0:
             filtered_matches_dict[key_pair] = matches[0]
@@ -865,11 +873,11 @@ def filter_matches_graph(frames, matches_dict, features_data_t, threshold=0.6, d
                 #another_et_another_et005.png-another_et_another_et004.png-another_et_another_et001.png
                 # 如果循环误差过大，移除该三元组中匹配数量最少的匹配对
 
-                # # 在filter_matches_graph函数中添加调用
-                # # 在处理循环时添加：
-                # if 'another_et_another_et005.png-another_et_another_et004.png-another_et_another_et001.png' in cycle_name:
-                #     visualize_cycle_consistency(cycle_name, frames, filtered_matches_dict, features_data, 
-                #                             output_dir='cycle_visualization')
+                # # # 在filter_matches_graph函数中添加调用
+                # # # 在处理循环时添加：
+                # if 'another_et_another_et008.png-another_et_another_et001.png-another_et_another_et009.png' in cycle_name:
+                #     # visualize_cycle_consistency(cycle_name, frames, filtered_matches_dict, features_data, 
+                #     #                         output_dir='cycle_visualization')
                     
                 #     # 添加轨迹可视化
                 #     visualize_cycle_consistency_with_tracks(cycle_name, frames, filtered_matches_dict, 
