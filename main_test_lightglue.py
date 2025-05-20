@@ -445,6 +445,7 @@ def detect_sp_ensemble(lightglue_matcher, img_fnames, feature_dir='.featureout',
                 feats0_alike_pkts = feats0_alike['keypoints'].reshape(-1, 2).detach().cpu().numpy()
                 kpts[num_features:num_features+len(feats0_alike_pkts)] = feats0_alike_pkts
                 descs[num_features:num_features+len(feats0_alike_pkts),:128] = feats0_alike['descriptors'].reshape(len(feats0_alike_pkts), -1).detach().cpu().numpy()
+                descs[num_features:num_features+len(feats0_alike_pkts),128:] = feats0_alike['descriptors'].reshape(len(feats0_alike_pkts), -1).detach().cpu().numpy()
 
                 f_kp_coarse[key] = kpts
                 f_kp[key] = kpts
@@ -4442,7 +4443,7 @@ for dataset, predictions in samples.items():
         # index_pairs.append((9,4))
         t = time()
         # detect_aliked(images, feature_dir, 4096, device=device)
-        detect_sp_ensemble_mr(lightglue_matcher, images, feature_dir, 4096, device=device)
+        detect_sp_ensemble(lightglue_matcher, images, feature_dir, 4096, device=device)
         timings['feature_detection'].append(time() - t)
         print(f'Features detected in {time() - t:.4f} sec')
 
@@ -4457,23 +4458,23 @@ for dataset, predictions in samples.items():
         # timings['feature_matching'].append(time() - t)
         # print(f'Features matched in {time() - t:.4f} sec')
 
-        # # 3. 微调LightGlue
-        # t = time()
-        # fine_tuned_matcher = fine_tune_lightglue(
-        #     lightglue_matcher,
-        #     images, 
-        #     feature_dir, 
-        #     device,
-        #     batch_size=4,
-        #     epochs=1
-        # )
-        # lightglue_matcher.update_model(fine_tuned_matcher)
-        # print(f'模型微调完成，耗时 {time() - t:.4f} sec')
+        # 3. 微调LightGlue
+        t = time()
+        fine_tuned_matcher = fine_tune_lightglue(
+            lightglue_matcher,
+            images, 
+            feature_dir, 
+            device,
+            batch_size=4,
+            epochs=1
+        )
+        lightglue_matcher.update_model(fine_tuned_matcher)
+        print(f'模型微调完成，耗时 {time() - t:.4f} sec')
         
 
         t = time()
         # match_matrix = match_with_gimloftr(lightglue_matcher, images, index_pairs, feature_dir=feature_dir, device=device, verbose=False)
-        match_matrix = match_with_gimlightglue_ensemble_mr(lightglue_matcher, images, index_pairs, feature_dir=feature_dir, device=device, verbose=False)
+        match_matrix = match_with_gimlightglue_ensemble(lightglue_matcher, images, index_pairs, feature_dir=feature_dir, device=device, verbose=False)
         # match_matrix = refine_matches(lightglue_matcher, images, index_pairs, feature_dir=feature_dir, device=device, verbose=False)
         timings['feature_matching'].append(time() - t)
         print(f'Features matched in {time() - t:.4f} sec')
@@ -4508,7 +4509,7 @@ for dataset, predictions in samples.items():
         # df = extract_match_features(matches_dict, features_data, output_csv_path)
         # cycle_csv_path = None
         # lr_model_path = './results/combined_model/'
-        lr_model_path = './results/combined_model'
+        lr_model_path = './lr_model/v95'
         filtered_matches_dict = filter_match_with_lr(matches_dict, features_data, model_dir=lr_model_path,threshold=0.9)
         filtered_matches_dict, cycle_error_data = filter_matches_graph(images, filtered_matches_dict, features_data, output_csv=cycle_csv_path)
         
@@ -4517,7 +4518,7 @@ for dataset, predictions in samples.items():
         # visualize_connections(key, filtered_matches_dict, features_data, images, "connections_viz")
 
         # # 可视化过滤结果
-        visualize_filtered_matches(images, matches_dict, filtered_matches_dict, features_data, os.path.join(feature_dir, 'graph_results'))
+        # visualize_filtered_matches(images, matches_dict, filtered_matches_dict, features_data, os.path.join(feature_dir, 'graph_results'))
         
         import shutil
         # 备份原始 matches.h5 文件（如果存在）
