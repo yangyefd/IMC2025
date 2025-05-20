@@ -116,14 +116,14 @@ def read_image_mr(path, grayscale=False):
     if max_dim < 800:
         # 小图像: 原始、放大1.2倍、放大1.44倍
         scales = [1.0, 1.2, 1.44]
-    elif max_dim > 1920:
+    elif max_dim > 2048:
         # 大图像: 原始、缩小0.8倍、缩小0.65倍
         scales = [1.0, 0.65, 0.8]
     else:
         # 中等尺寸图像: 原始、放大1.2倍、缩小0.8倍
         scales = [1.0, 0.8, 1.2]
     # scales = [1.0, 1, 1]
-    if grayscale:
+    if grayscale and len(image) == 3:
         image = image[:,:,0]
     # 生成多分辨率图像
     images_mr = []
@@ -247,6 +247,7 @@ def preprocess(image: np.ndarray, grayscale: bool = False, resize_max: int = Non
     size = image.shape[:2][::-1]
     scale = np.array([1.0, 1.0])
 
+    resize_max = 4096
     if resize_max:
         scale = resize_max / max(size)
         if scale < 1.0:
@@ -704,11 +705,17 @@ class Lightglue_Matcher():
         keep_indices = torch.tensor(keep_indices, device=device)
         suppressed_indices = torch.tensor(suppressed_indices, device=device)
         
-        # 创建新的索引顺序：先是通过NMS的点，然后是被抑制的点
-        new_indices = torch.cat([
-            indices[keep_indices],  # 通过NMS的高分点
-            indices[suppressed_indices]  # 被抑制的低分点
-        ])
+        # 处理 suppressed_indices 为空的情况
+        if len(suppressed_indices) > 0:
+            suppressed_indices = torch.tensor(suppressed_indices, device=device)
+            # 创建新的索引顺序：先是通过NMS的点，然后是被抑制的点
+            new_indices = torch.cat([
+                indices[keep_indices],  # 通过NMS的高分点
+                indices[suppressed_indices]  # 被抑制的低分点
+            ])
+        else:
+            # 如果没有被抑制的点，直接使用keep_indices
+            new_indices = indices[keep_indices]
         
         # 重新排序特征点和描述符
         keypoints = keypoints[:,new_indices]
@@ -951,11 +958,17 @@ class Lightglue_Matcher():
             keep_indices = torch.tensor(keep_indices, device=device)
             suppressed_indices = torch.tensor(suppressed_indices, device=device)
             
-            # 创建新的索引顺序：先是通过NMS的点，然后是被抑制的点
-            new_indices = torch.cat([
-                indices[keep_indices],  # 通过NMS的高分点
-                indices[suppressed_indices]  # 被抑制的低分点
-            ])
+            # 处理 suppressed_indices 为空的情况
+            if len(suppressed_indices) > 0:
+                suppressed_indices = torch.tensor(suppressed_indices, device=device)
+                # 创建新的索引顺序：先是通过NMS的点，然后是被抑制的点
+                new_indices = torch.cat([
+                    indices[keep_indices],  # 通过NMS的高分点
+                    indices[suppressed_indices]  # 被抑制的低分点
+                ])
+            else:
+                # 如果没有被抑制的点，直接使用keep_indices
+                new_indices = indices[keep_indices]
             
             # 重新排序特征点和描述符
             keypoints = keypoints[:,new_indices]
