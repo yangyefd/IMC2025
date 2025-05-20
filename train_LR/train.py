@@ -12,32 +12,148 @@ from sklearn.metrics import roc_curve, roc_auc_score, precision_recall_curve, av
 from sklearn.metrics import confusion_matrix, classification_report
 from sklearn.utils import shuffle
 from tqdm import tqdm
+import re
+import glob
 
 # 设置中文字体支持
 plt.rcParams['font.sans-serif'] = ['SimHei']  # 用黑体显示中文
 plt.rcParams['axes.unicode_minus'] = False  # 正常显示负号
 
-def load_data(csv_path):
+def extract_scene_name(filename):
     """
-    加载CSV文件中的匹配特征数据
+    从文件名提取场景名称
+    例如：
+    - another_et_another_et002.png -> another_et_another_et002
+    - another_et_another_165464.png -> another_et_another
     
     Args:
-        csv_path: CSV文件路径
+        filename: 文件名
         
     Returns:
-        pandas DataFrame: 特征数据
+        str: 提取的场景名称
     """
-    print(f"加载数据: {csv_path}")
-    df = pd.read_csv(csv_path)
-    print(f"数据加载完成，共 {len(df)} 个样本")
+    # 去除扩展名
+    name = filename.split('.')[0]
+    name = "_".join(name.split('_')[:-1])  # 处理路径分隔符
     
-    # 检查数据
-    print(f"正样本数量: {df['label'].sum()}")
-    print(f"负样本数量: {len(df) - df['label'].sum()}")
-    print(f"特征数量: {len(df.columns) - 5}")  # 减去key1, key2, label, scene1, scene2
+    # 分割文件名
+    parts = name.split('_')
     
-    return df
+    # 如果最后一部分是含有多个数字的字符串（4位以上），则移除
+    if len(parts) > 0 and re.match(r'.*\d{4,}', parts[-1]):
+        return '_'.join(parts[:-1])
+    
+    # 否则保留完整的名称（可能包含少量数字）
+    return name
 
+
+def regenerate_labels(df):
+    """
+    根据key1和key2重新生成label
+    
+    Args:
+        df: 包含key1和key2的DataFrame
+        
+    Returns:
+        DataFrame: 包含重新生成label的DataFrame
+    """
+    # 复制DataFrame以避免修改原始数据
+    df_new = df.copy()
+    
+    # 提取场景名称
+    scene_names1 = []
+    scene_names2 = []
+    
+    for key1 in df_new['key1']:
+        scene_names1.append(extract_scene_name(key1))
+    
+    for key2 in df_new['key2']:
+        scene_names2.append(extract_scene_name(key2))
+    
+    # 保存场景名称到DataFrame
+    df_new['scene1'] = scene_names1
+    df_new['scene2'] = scene_names2
+    
+    # 根据场景名称生成新标签
+    df_new['new_label'] = (df_new['scene1'] == df_new['scene2']).astype(int)
+    
+    # 比较原始标签和新标签的差异
+    if 'label' in df_new.columns:
+        different_labels = (df_new['label'] != df_new['new_label']).sum()
+        print(f"原始标签和新生成的标签有 {different_labels} 个不同 (占比 {different_labels/len(df_new):.2%})")
+    
+    # 将新标签赋给label列
+    df_new['label'] = df_new['new_label']
+    df_new.drop('new_label', axis=1, inplace=True)
+    
+    return df_new
+
+def load_all_data(base_folder):
+    """
+    加载所有matches_features.csv文件，并合并数据
+    
+    Args:
+        base_folder: 基础文件夹路径
+        
+    Returns:
+        DataFrame: 合并后的数据
+        list: 已处理的CSV文件路径
+    """
+    # 查找所有matches_features.csv文件
+    csv_files = glob.glob(os.path.join(base_folder, '**/matches_features.csv'), recursive=True)
+    
+    if not csv_files:
+        print(f"未在 {base_folder} 下找到任何 matches_features.csv 文件")
+        return None, []
+    
+    print(f"找到 {len(csv_files)} 个 matches_features.csv 文件")
+    
+    all_data = []
+    processed_files = []
+    
+    # 处理每个文件
+    for csv_path in csv_files:
+        print(f"\n处理文件: {csv_path}")
+        try:
+            # 读取CSV文件
+            df = pd.read_csv(csv_path)
+            print(f"数据加载完成，共 {len(df)} 个样本")
+            
+            # 重新生成标签
+            df = regenerate_labels(df)
+            
+            # 检查数据
+            print(f"重新生成标签后:")
+            print(f"正样本数量: {df['label'].sum()}")
+            print(f"负样本数量: {len(df) - df['label'].sum()}")
+            
+            # 添加数据来源列，用于跟踪
+            folder_name = os.path.basename(os.path.dirname(csv_path))
+            df['data_source'] = folder_name
+            
+            # 保存处理后的CSV
+            output_path = csv_path.replace('matches_features.csv', 'matches_features_relabeled.csv')
+            df.to_csv(output_path, index=False)
+            print(f"重新标记的数据已保存到: {output_path}")
+            
+            # 将数据添加到合并列表中
+            all_data.append(df)
+            processed_files.append(csv_path)
+            
+        except Exception as e:
+            print(f"处理文件 {csv_path} 时出错: {str(e)}")
+    
+    if not all_data:
+        print("没有成功加载任何数据")
+        return None, []
+    
+    # 合并所有数据
+    merged_data = pd.concat(all_data, ignore_index=True)
+    print(f"\n合并后的数据集: {len(merged_data)} 个样本")
+    print(f"正样本: {merged_data['label'].sum()} ({merged_data['label'].mean():.2%})")
+    print(f"负样本: {len(merged_data) - merged_data['label'].sum()} ({1-merged_data['label'].mean():.2%})")
+    
+    return merged_data, processed_files
 
 def preprocess_data(df):
     """
@@ -59,7 +175,7 @@ def preprocess_data(df):
     df = df.fillna(0)
     
     # 移除非特征列
-    non_feature_cols = ['key1', 'key2', 'label', 'scene1', 'scene2']
+    non_feature_cols = ['key1', 'key2', 'label', 'scene1', 'scene2', 'data_source']
     feature_cols = [col for col in df.columns if col not in non_feature_cols]
     
     # 检查无穷值和NaN值
@@ -107,7 +223,7 @@ def analyze_data(df, output_dir=None):
     # plt.show()
     
     # 2. 特征相关性分析
-    non_feature_cols = ['key1', 'key2', 'label', 'scene1', 'scene2']
+    non_feature_cols = ['key1', 'key2', 'label', 'scene1', 'scene2', 'data_source']
     feature_cols = [col for col in df.columns if col not in non_feature_cols]
     
     # 计算与标签的相关性
@@ -179,7 +295,7 @@ def train_lr_model(X, y, feature_names=None, cv=5, output_dir=None):
     print("执行网格搜索...")
     cv_strategy = StratifiedKFold(n_splits=cv, shuffle=True, random_state=42)
     grid_search = GridSearchCV(
-        LogisticRegression(max_iter=1000, random_state=42),
+        LogisticRegression(max_iter=10000, random_state=42),
         param_grid,
         cv=cv_strategy,
         scoring='f1',
@@ -284,7 +400,7 @@ def train_lr_model(X, y, feature_names=None, cv=5, output_dir=None):
     
     # 计算阈值表
     print("\n计算不同分类阈值下的性能指标...")
-    thresholds = np.arange(0, 1.01, 0.01)
+    thresholds = np.arange(0, 1.01, 0.00001)
     threshold_metrics = []
 
     for threshold in tqdm(thresholds, desc="计算阈值表"):
@@ -380,17 +496,28 @@ def save_model(model, scaler, feature_names, output_dir):
 
 def main():
     # 设置路径
-    data_dir = './results/featureout/stairs'  # 根据实际路径调整
-    csv_path = os.path.join(data_dir, 'matches_features.csv')
-    output_dir = os.path.join(data_dir, 'lr_model')
+    base_dir = './results/featureout/'  # 根据实际路径调整
+    output_dir = './results/combined_model/'  # 合并模型的输出目录
     
-    # 加载数据
-    df = load_data(csv_path)
+    # 确保输出目录存在
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    
+    # 加载所有数据并合并
+    df_all, processed_files = load_all_data(base_dir)
+    
+    if df_all is None or len(df_all) == 0:
+        print("未能加载任何数据，程序退出。")
+        return
+    
+    # 记录处理的文件列表
+    with open(os.path.join(output_dir, 'processed_files.txt'), 'w') as f:
+        for file_path in processed_files:
+            f.write(f"{file_path}\n")
     
     # 平衡数据集（可选）
-    # 如果类别不平衡严重，可以考虑平衡数据
-    pos_samples = df[df['label'] == 1]
-    neg_samples = df[df['label'] == 0]
+    pos_samples = df_all[df_all['label'] == 1]
+    neg_samples = df_all[df_all['label'] == 0]
     print(f"正样本: {len(pos_samples)}, 负样本: {len(neg_samples)}")
     
     # 如果负样本比正样本多很多，可以考虑降采样
@@ -402,13 +529,18 @@ def main():
         # 打乱数据
         df_balanced = shuffle(df_balanced, random_state=42)
         print(f"平衡后数据集: {len(df_balanced)} 样本，正样本: {sum(df_balanced['label'])}, 负样本: {len(df_balanced) - sum(df_balanced['label'])}")
-        df = df_balanced
+        df_all = df_balanced
+    
+    # 保存合并后的数据
+    combined_data_path = os.path.join(output_dir, 'combined_data.csv')
+    df_all.to_csv(combined_data_path, index=False)
+    print(f"合并后的数据已保存至: {combined_data_path}")
     
     # 数据分析
-    analyze_data(df, output_dir)
+    analyze_data(df_all, output_dir)
     
     # 预处理数据
-    X, y, feature_names, scaler = preprocess_data(df)
+    X, y, feature_names, scaler = preprocess_data(df_all)
     
     # 训练模型并获取阈值表
     model, feature_importances, thresholds_df = train_lr_model(X, y, feature_names, output_dir=output_dir)
