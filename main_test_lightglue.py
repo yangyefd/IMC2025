@@ -4384,8 +4384,8 @@ if is_OneTest:
     ]
 else:
     dataset_train_test_lst = [
-        'ETs',
-        # 'stairs'
+        # 'ETs',
+        'stairs'
         # 'imc2023_heritage'
     ]
     
@@ -4410,7 +4410,7 @@ for dataset, predictions in samples.items():
     feature_dir = os.path.join(workdir, 'featureout', dataset)
     os.makedirs(feature_dir, exist_ok=True)
 
-    if 1:
+    if 0:
         # try:
         t = time()
         # index_pairs = get_image_pairs_shortlist(images, sim_th=0.3, min_pairs=20, 
@@ -4507,7 +4507,9 @@ for dataset, predictions in samples.items():
         # 提取特征并保存到CSV
         # df = extract_match_features(matches_dict, features_data, output_csv_path)
         # cycle_csv_path = None
-        filtered_matches_dict = filter_match_with_lr(matches_dict, features_data, threshold=0.5)
+        # lr_model_path = './results/combined_model/'
+        lr_model_path = './results/combined_model'
+        filtered_matches_dict = filter_match_with_lr(matches_dict, features_data, model_dir=lr_model_path,threshold=0.9)
         filtered_matches_dict, cycle_error_data = filter_matches_graph(images, filtered_matches_dict, features_data, output_csv=cycle_csv_path)
         
         # # 示例调用

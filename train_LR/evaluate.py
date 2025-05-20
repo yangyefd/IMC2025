@@ -3,20 +3,14 @@
 import os
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
 import joblib
-from sklearn.metrics import confusion_matrix
 import glob
 from tqdm import tqdm
 import logging
 import sys
 import re
+import argparse
 from collections import defaultdict
-
-# 设置中文字体支持
-plt.rcParams['font.sans-serif'] = ['SimHei']  # 用黑体显示中文
-plt.rcParams['axes.unicode_minus'] = False  # 正常显示负号
 
 # 配置日志
 logging.basicConfig(
@@ -32,20 +26,10 @@ logger = logging.getLogger(__name__)
 
 
 def extract_scene_name(filename):
-    """
-    从文件名提取场景名称
-    例如：
-    - another_et_another_et002.png -> another_et_another_et002
-    - another_et_another_165464.png -> another_et_another
-    
-    Args:
-        filename: 文件名
-        
-    Returns:
-        str: 提取的场景名称
-    """
+    """从文件名提取场景名称"""
     # 去除扩展名
     name = filename.split('.')[0]
+    name = "_".join(name.split('_')[:-1])  # 处理路径分隔符
     
     # 分割文件名
     parts = name.split('_')
@@ -59,18 +43,7 @@ def extract_scene_name(filename):
 
 
 def load_model(model_dir):
-    """
-    加载模型、缩放器和特征名称
-    
-    Args:
-        model_dir: 模型目录路径
-        
-    Returns:
-        model: 加载的模型
-        scaler: 加载的缩放器
-        feature_names: 特征名称
-        threshold: 分类阈值
-    """
+    """加载模型、缩放器和特征名称"""
     # 判断是否是高级模型目录
     is_advanced = os.path.exists(os.path.join(model_dir, 'best_single_model.pkl'))
     
@@ -117,21 +90,13 @@ def load_model(model_dir):
     logger.info(f"已加载模型: {model_path}")
     logger.info(f"已加载缩放器: {scaler_path}")
     logger.info(f"已加载特征名称: {feature_names_path}")
-    logger.info(f"使用分类阈值: {threshold}")
+    logger.info(f"默认分类阈值: {threshold}")
     
     return model, scaler, feature_names, threshold
 
 
 def find_csv_files(base_dir):
-    """
-    查找所有matches_features.csv或matches_features_relabeled.csv文件
-    
-    Args:
-        base_dir: 基础目录
-        
-    Returns:
-        list: CSV文件路径列表
-    """
+    """查找所有matches_features.csv或matches_features_relabeled.csv文件"""
     csv_files = []
     
     # 优先查找relabeled文件
@@ -149,225 +114,15 @@ def find_csv_files(base_dir):
     return csv_files
 
 
-def evaluate_scene(df, model, scaler, feature_names, threshold, frr_warning_threshold=0.1):
-    """
-    评估单个场景的FAFR性能
-    
-    Args:
-        df: DataFrame，包含特征和标签
-        model: 模型
-        scaler: 缩放器
-        feature_names: 特征名称
-        threshold: 分类阈值
-        frr_warning_threshold: FRR警告阈值
-        
-    Returns:
-        dict: 包含FAR/FRR/精确率/召回率等指标的字典
-    """
-    # 确保所有特征都存在
-    missing_features = [f for f in feature_names if f not in df.columns]
-    if missing_features:
-        for feature in missing_features:
-            df[feature] = 0  # 用0填充缺失的特征
-    
-    # 准备特征矩阵
-    X = df[feature_names].values
-    y_true = df['label'].values
-    
-    # 缩放特征
-    X_scaled = scaler.transform(X)
-    
-    # 预测概率和类别
-    y_prob = model.predict_proba(X_scaled)[:, 1]
-    y_pred = (y_prob >= threshold).astype(int)
-    
-    # 计算混淆矩阵
-    tn, fp, fn, tp = confusion_matrix(y_true, y_pred, labels=[0, 1]).ravel()
-    
-    # 计算指标
-    far = fp / (fp + tn) if (fp + tn) > 0 else 0
-    frr = fn / (fn + tp) if (fn + tp) > 0 else 0
-    precision = tp / (tp + fp) if (tp + fp) > 0 else 0
-    recall = tp / (tp + fn) if (fn + tp) > 0 else 0
-    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
-    
-    # 判断是否需要警告
-    warning = frr > frr_warning_threshold
-    
-    return {
-        'total_samples': len(df),
-        'positive_samples': sum(y_true),
-        'negative_samples': len(y_true) - sum(y_true),
-        'true_positive': tp,
-        'false_positive': fp,
-        'true_negative': tn,
-        'false_negative': fn,
-        'far': far,
-        'frr': frr,
-        'precision': precision,
-        'recall': recall,
-        'f1': f1,
-        'warning': warning
-    }
-
-
-def analyze_scores_by_scene(df, model, scaler, feature_names):
-    """
-    分析不同场景的分数分布
-    
-    Args:
-        df: DataFrame，包含特征和标签
-        model: 模型
-        scaler: 缩放器
-        feature_names: 特征名称
-        
-    Returns:
-        tuple: (positive_scores, negative_scores) 按场景分组的分数
-    """
-    # 提取场景信息
-    if 'scene1' not in df.columns or 'scene2' not in df.columns:
-        df['scene1'] = df['key1'].apply(extract_scene_name)
-        df['scene2'] = df['key2'].apply(extract_scene_name)
-    
-    # 确保所有特征都存在
-    missing_features = [f for f in feature_names if f not in df.columns]
-    if missing_features:
-        for feature in missing_features:
-            df[feature] = 0  # 用0填充缺失的特征
-    
-    # 准备特征矩阵
-    X = df[feature_names].values
-    
-    # 缩放特征
-    X_scaled = scaler.transform(X)
-    
-    # 预测概率
-    df['score'] = model.predict_proba(X_scaled)[:, 1]
-    
-    # 区分同场景和不同场景匹配
-    df['same_scene'] = (df['scene1'] == df['scene2']).astype(int)
-    
-    # 按场景分组计算分数
-    scene_scores = {}
-    
-    # 处理正样本（同场景）
-    positive_data = df[df['same_scene'] == 1]
-    positive_scores = {}
-    
-    for scene, group in positive_data.groupby('scene1'):
-        positive_scores[scene] = group['score'].values
-    
-    # 处理负样本（不同场景）
-    negative_data = df[df['same_scene'] == 0]
-    negative_scores = {}
-    
-    for (scene1, scene2), group in negative_data.groupby(['scene1', 'scene2']):
-        scene_pair = f"{scene1}-{scene2}"
-        negative_scores[scene_pair] = group['score'].values
-    
-    return positive_scores, negative_scores
-
-
-def plot_score_distributions(positive_scores, negative_scores, output_dir=None):
-    """
-    绘制分数分布图
-    
-    Args:
-        positive_scores: 按场景分组的正样本分数
-        negative_scores: 按场景分组的负样本分数
-        output_dir: 输出目录
-    """
-    # 创建输出目录
-    if output_dir and not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-    
-    # 合并所有分数
-    all_positive = np.concatenate([scores for scores in positive_scores.values()])
-    all_negative = np.concatenate([scores for scores in negative_scores.values()])
-    
-    # 绘制整体分布
-    plt.figure(figsize=(12, 8))
-    sns.histplot(all_positive, kde=True, stat="density", label="同场景匹配", color="green", alpha=0.6)
-    sns.histplot(all_negative, kde=True, stat="density", label="不同场景匹配", color="red", alpha=0.6)
-    plt.title("同场景与不同场景匹配分数分布")
-    plt.xlabel("分数")
-    plt.ylabel("密度")
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    
-    if output_dir:
-        plt.savefig(os.path.join(output_dir, "overall_distribution.png"), dpi=300, bbox_inches="tight")
-    # else:
-    #     plt.show()
-    
-    # 绘制各场景分布
-    for scene, scores in positive_scores.items():
-        if len(scores) < 10:  # 样本太少，跳过
-            continue
-            
-        plt.figure(figsize=(10, 6))
-        sns.histplot(scores, kde=True, stat="density", color="green", alpha=0.8)
-        plt.title(f"场景: {scene} 的匹配分数分布")
-        plt.xlabel("分数")
-        plt.ylabel("密度")
-        plt.grid(True, alpha=0.3)
-        
-        if output_dir:
-            plt.savefig(os.path.join(output_dir, f"scene_{scene}_distribution.png"), dpi=300, bbox_inches="tight")
-            plt.close()
-    
-    # 绘制热力图展示场景间匹配情况
-    scene_matrix = defaultdict(lambda: defaultdict(list))
-    
-    # 收集所有场景
-    scenes = set(positive_scores.keys())
-    
-    # 填充同场景匹配的平均分数
-    for scene, scores in positive_scores.items():
-        scene_matrix[scene][scene] = np.mean(scores) if len(scores) > 0 else 0
-    
-    # 填充不同场景匹配的平均分数
-    for scene_pair, scores in negative_scores.items():
-        if '-' in scene_pair:
-            scene1, scene2 = scene_pair.split('-')
-            scenes.add(scene1)
-            scenes.add(scene2)
-            scene_matrix[scene1][scene2] = np.mean(scores) if len(scores) > 0 else 0
-    
-    # 转换为DataFrame进行可视化
-    scenes = sorted(list(scenes))
-    matrix_data = np.zeros((len(scenes), len(scenes)))
-    
-    for i, scene1 in enumerate(scenes):
-        for j, scene2 in enumerate(scenes):
-            if isinstance(scene_matrix[scene1][scene2], list):
-                matrix_data[i, j] = np.mean(scene_matrix[scene1][scene2]) if scene_matrix[scene1][scene2] else 0
-            else:
-                matrix_data[i, j] = scene_matrix[scene1][scene2]
-    
-    # 绘制热力图
-    plt.figure(figsize=(14, 12))
-    sns.heatmap(matrix_data, annot=False, fmt=".2f", cmap="coolwarm", 
-                xticklabels=scenes, yticklabels=scenes)
-    plt.title("场景间匹配平均分数热力图")
-    plt.tight_layout()
-    
-    if output_dir:
-        plt.savefig(os.path.join(output_dir, "scene_heatmap.png"), dpi=300, bbox_inches="tight")
-    # else:
-    #     plt.show()
-
-
 def main():
     """主函数"""
     # 解析命令行参数
-    import argparse
     parser = argparse.ArgumentParser(description="评估LR分类器在各个场景的FAFR性能")
     parser.add_argument("--model_dir", type=str, default="./results/combined_model",
                         help="模型目录路径")
     parser.add_argument("--data_dir", type=str, default="./results/featureout",
                         help="特征CSV所在目录")
-    parser.add_argument("--threshold", type=float, default=0.29,
+    parser.add_argument("--threshold", type=float, default=0.9,
                         help="分类阈值，不指定则使用模型默认阈值")
     parser.add_argument("--output_dir", type=str, default="./evaluation_results",
                         help="结果输出目录")
@@ -402,112 +157,126 @@ def main():
         logger.error(f"未在{args.data_dir}下找到特征CSV文件")
         return
     
-    # 按场景评估
-    results = {}
+    # 加载所有数据
     all_data = pd.DataFrame()
-    
-    for csv_file in tqdm(csv_files, desc="处理特征文件"):
+    for csv_file in tqdm(csv_files, desc="加载数据"):
         try:
-            # 加载数据
             df = pd.read_csv(csv_file)
-            
             # 如果没有scene列，添加场景信息
             if 'scene1' not in df.columns or 'scene2' not in df.columns:
                 df['scene1'] = df['key1'].apply(extract_scene_name)
                 df['scene2'] = df['key2'].apply(extract_scene_name)
             
             # 如果没有label列，根据scene生成label
-            if 'label' not in df.columns:
-                df['label'] = (df['scene1'] == df['scene2']).astype(int)
-            
-            # 添加到全部数据
+            df['label'] = (df['scene1'] == df['scene2']).astype(int)
+                
             all_data = pd.concat([all_data, df], ignore_index=True)
-            
-            # 按场景分组评估
-            for (scene1, scene2), group in df.groupby(['scene1', 'scene2']):
-                # 只评估同场景匹配
-                if scene1 != scene2:
-                    continue
-                    
-                scene = scene1
-                scene_results = evaluate_scene(
-                    group, model, scaler, feature_names, threshold, args.frr_warning
-                )
-                
-                results[scene] = scene_results
-                
-                # 如果FRR超过警告阈值，记录警告
-                if scene_results['warning']:
-                    logger.warning(
-                        f"场景 {scene} 的FRR = {scene_results['frr']:.4f}, "
-                        f"超过警告阈值 {args.frr_warning}"
-                    )
         except Exception as e:
             logger.error(f"处理文件 {csv_file} 时出错: {e}")
     
-    # 合并所有场景结果
-    all_results = evaluate_scene(all_data, model, scaler, feature_names, threshold)
+    # 确保所有特征都存在
+    missing_features = [f for f in feature_names if f not in all_data.columns]
+    if missing_features:
+        for feature in missing_features:
+            all_data[feature] = 0  # 用0填充缺失的特征
+
+    # 准备特征矩阵
+    X = all_data[feature_names].values
     
-    # 输出总体结果
+    # 缩放特征
+    X_scaled = scaler.transform(X)
+    
+    # 预测概率和类别
+    all_data['pred_prob'] = model.predict_proba(X_scaled)[:, 1]
+    all_data['pred'] = (all_data['pred_prob'] >= threshold).astype(int)
+    
+    # 初始化场景统计
+    scene_stats = defaultdict(lambda: {'total': 0, 'fa': 0, 'fr': 0})
+    
+    # 处理同场景匹配（计算FR）
+    same_scene = all_data[all_data['scene1'] == all_data['scene2']]
+    for _, row in same_scene.iterrows():
+        scene = row['scene1']
+        scene_stats[scene]['total'] += 1
+        # 如果预测错误（假阴性），增加FR计数
+        if row['pred'] == 0 and row['label'] == 1:
+            scene_stats[scene]['fr'] += 1
+    
+    # 处理不同场景匹配（计算FA）
+    diff_scene = all_data[all_data['scene1'] != all_data['scene2']]
+    for _, row in diff_scene.iterrows():
+        scene1 = row['scene1']
+        scene2 = row['scene2']
+        # 同时增加两个场景的比对总数
+        scene_stats[scene1]['total'] += 1
+        scene_stats[scene2]['total'] += 1
+        # 如果预测错误（假阳性），为两个场景都增加FA
+        if row['pred'] == 1 and row['label'] == 0:
+            scene_stats[scene1]['fa'] += 1
+            scene_stats[scene2]['fa'] += 1
+    
+    # 计算总体统计
+    all_total = sum(stat['total'] for stat in scene_stats.values())
+    all_fa = sum(stat['fa'] for stat in scene_stats.values())
+    all_fr = sum(stat['fr'] for stat in scene_stats.values())
+    all_far = all_fa / all_total if all_total > 0 else 0
+    all_frr = all_fr / len(same_scene) if len(same_scene) > 0 else 0
+    
+    # 打印总体结果
     logger.info("\n--- 总体评估结果 ---")
-    logger.info(f"总样本数: {all_results['total_samples']}")
-    logger.info(f"正样本数: {all_results['positive_samples']} ({all_results['positive_samples']/all_results['total_samples']*100:.1f}%)")
-    logger.info(f"负样本数: {all_results['negative_samples']} ({all_results['negative_samples']/all_results['total_samples']*100:.1f}%)")
-    logger.info(f"FAR: {all_results['far']:.4f}")
-    logger.info(f"FRR: {all_results['frr']:.4f}")
-    logger.info(f"精确率: {all_results['precision']:.4f}")
-    logger.info(f"召回率: {all_results['recall']:.4f}")
-    logger.info(f"F1分数: {all_results['f1']:.4f}")
+    logger.info(f"总匹配对数: {all_total}")
+    logger.info(f"FA数: {all_fa}")
+    logger.info(f"FR数: {all_fr}")
+    logger.info(f"FAR: {all_far:.6f}")
+    logger.info(f"FRR: {all_frr:.6f}")
     
-    # 输出每个场景的结果
+    # 打印各场景结果
     logger.info("\n--- 各场景评估结果 ---")
-    scene_results_list = []
+    logger.info(f"{'场景':<20} {'匹配对总数':<10} {'FA数':<6} {'FR数':<6} {'FAR':<10} {'FRR':<10}")
     
-    for scene, result in results.items():
-        logger.info(f"\n场景: {scene}")
-        logger.info(f"  样本数: {result['total_samples']}")
-        logger.info(f"  FAR: {result['far']:.4f}")
-        logger.info(f"  FRR: {result['frr']:.4f}")
-        logger.info(f"  精确率: {result['precision']:.4f}")
-        logger.info(f"  召回率: {result['recall']:.4f}")
-        logger.info(f"  F1分数: {result['f1']:.4f}")
+    # 存储超过警告阈值的场景
+    warning_scenes = []
+    
+    # 计算并打印每个场景的统计数据
+    for scene, stats in sorted(scene_stats.items()):
+        # 计算FAR和FRR
+        far = stats['fa'] / stats['total'] if stats['total'] > 0 else 0
+        # 计算FRR需要找出该场景的同场景匹配数
+        same_scene_count = len(same_scene[same_scene['scene1'] == scene])
+        frr = stats['fr'] / same_scene_count if same_scene_count > 0 else 0
         
-        scene_results_list.append({
-            'scene': scene,
-            'samples': result['total_samples'],
-            'far': result['far'],
-            'frr': result['frr'],
-            'precision': result['precision'],
-            'recall': result['recall'],
-            'f1': result['f1']
-        })
+        logger.info(f"{scene:<20} {stats['total']:<10} {stats['fa']:<6} {stats['fr']:<6} {far:<10.6f} {frr:<10.6f}")
+        
+        # 检查是否超过警告阈值
+        if frr > args.frr_warning:
+            warning_scenes.append((scene, frr))
+    
+    # 打印超过警告阈值的场景
+    if warning_scenes:
+        logger.info("\n--- FRR超过警告阈值的场景 ---")
+        for scene, frr in sorted(warning_scenes, key=lambda x: x[1], reverse=True):
+            logger.warning(f"场景: {scene}, FRR: {frr:.6f}, 超过警告阈值 {args.frr_warning}")
     
     # 保存结果到CSV
     if args.output_dir:
-        scene_results_df = pd.DataFrame(scene_results_list)
-        scene_results_df.to_csv(os.path.join(args.output_dir, 'scene_results.csv'), index=False)
-        logger.info(f"\n各场景结果已保存到: {os.path.join(args.output_dir, 'scene_results.csv')}")
-    
-    # 分析分数分布
-    logger.info("\n分析分数分布...")
-    positive_scores, negative_scores = analyze_scores_by_scene(all_data, model, scaler, feature_names)
-    
-    # 绘制分数分布图
-    plot_score_distributions(positive_scores, negative_scores, args.output_dir)
-    logger.info(f"分数分布图已保存到: {args.output_dir}")
-    
-    # 计算一些额外的统计信息
-    scene_stats_df = pd.DataFrame(scene_results_list)
-    logger.info("\n--- 场景性能统计 ---")
-    logger.info(f"平均FAR: {scene_stats_df['far'].mean():.4f} ± {scene_stats_df['far'].std():.4f}")
-    logger.info(f"平均FRR: {scene_stats_df['frr'].mean():.4f} ± {scene_stats_df['frr'].std():.4f}")
-    logger.info(f"平均F1分数: {scene_stats_df['f1'].mean():.4f} ± {scene_stats_df['f1'].std():.4f}")
-    
-    high_frr_scenes = scene_stats_df[scene_stats_df['frr'] > args.frr_warning]
-    if not high_frr_scenes.empty:
-        logger.warning(f"\n发现 {len(high_frr_scenes)} 个FRR较高的场景:")
-        for _, row in high_frr_scenes.iterrows():
-            logger.warning(f"  场景: {row['scene']}, FRR: {row['frr']:.4f}")
+        results_list = []
+        for scene, stats in scene_stats.items():
+            same_scene_count = len(same_scene[same_scene['scene1'] == scene])
+            far = stats['fa'] / stats['total'] if stats['total'] > 0 else 0
+            frr = stats['fr'] / same_scene_count if same_scene_count > 0 else 0
+            
+            results_list.append({
+                'scene': scene,
+                'total_matches': stats['total'],
+                'fa_count': stats['fa'],
+                'fr_count': stats['fr'], 
+                'far': far,
+                'frr': frr
+            })
+        
+        results_df = pd.DataFrame(results_list)
+        results_df.to_csv(os.path.join(args.output_dir, 'scene_results.csv'), index=False)
+        logger.info(f"\n结果已保存到: {os.path.join(args.output_dir, 'scene_results.csv')}")
     
     logger.info("\n评估完成！")
 
