@@ -827,22 +827,22 @@ def fine_tune_lightglue(lightglue_matcher, images, feature_dir, device, epochs=5
     # 创建梯度缩放器用于半精度训练
     scaler = GradScaler()
     
-    #遍历所有图像，计算图像的长宽均值
-    image_sizes = []
-    for img_path in images:
-        img = Image.open(img_path).convert('L')
-        image_sizes.append((img.size[0], img.size[1]))
-    avg_width = sum(size[0] for size in image_sizes) / len(image_sizes)
-    avg_height = sum(size[1] for size in image_sizes) / len(image_sizes)
-    avg_size = int(max(avg_width,avg_height)) // 8 * 8 + 32
-    avg_size = avg_size*1.25
-    avg_size = int(avg_size // 8 * 8 + 32)
-    if avg_size > 1600:
-        avg_size = 1600
-    image_sizes = (avg_size, avg_size)
+    # #遍历所有图像，计算图像的长宽均值
+    # image_sizes = []
+    # for img_path in images:
+    #     img = Image.open(img_path).convert('L')
+    #     image_sizes.append((img.size[0], img.size[1]))
+    # avg_width = sum(size[0] for size in image_sizes) / len(image_sizes)
+    # avg_height = sum(size[1] for size in image_sizes) / len(image_sizes)
+    # avg_size = int(max(avg_width,avg_height)) // 8 * 8 + 32
+    # avg_size = avg_size*1.25
+    # avg_size = int(avg_size // 8 * 8 + 32)
+    # if avg_size > 1600:
+    #     avg_size = 1600
+    # image_sizes = (avg_size, avg_size)
 
     # 创建数据集和数据加载器
-    dataset = AugmentedImagePairDataset(images,  size=image_sizes, num_pairs_per_image=num_pairs_per_image)
+    dataset = AugmentedImagePairDataset(images, num_pairs_per_image=num_pairs_per_image)
     dataloader = DataLoader(
         dataset, 
         batch_size=batch_size, 
