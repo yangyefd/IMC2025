@@ -539,7 +539,7 @@ def get_loss(model, pred, data):
     return losses
 
 def get_gt(data, batch_size, device, distance_threshold=5):
-    match_matrix = torch.full((batch_size, 2048 + 1, 512 + 1), 0., device=device, dtype=data['keypoints0'][0].dtype)
+    match_matrix = torch.full((batch_size, 1024 + 1, 512 + 1), 0., device=device, dtype=data['keypoints0'][0].dtype)
     
     for b in range(batch_size):
         keypoints0 = data['keypoints0'][b]
@@ -808,7 +808,7 @@ def fine_tune_lightglue(lightglue_matcher, images, feature_dir, device, epochs=5
     
     # 获取模型引用
     matcher = copy.deepcopy(lightglue_matcher.model)
-    extractor = copy.deepcopy(lightglue_matcher.detector)
+    extractor = copy.deepcopy(lightglue_matcher.detector_fine)
 
     accumulation_steps_ori = len(images)*num_pairs_per_image / (30 * batch_size)
     accumulation_steps = max(1, int(accumulation_steps_ori))  # 确保至少为1
@@ -903,7 +903,7 @@ def fine_tune_lightglue(lightglue_matcher, images, feature_dir, device, epochs=5
                 # 批量特征提取
                 feats0 = extractor({
                     "image": imgs0,
-                    "max_kps":2048
+                    "max_kps":1024
                 })
                 
                 feats1 = extractor({

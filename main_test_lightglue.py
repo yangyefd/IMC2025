@@ -88,23 +88,45 @@ def get_global_desc(fnames, device=torch.device('cpu')):
     return torch.cat(global_descs_dinov2, dim=0)
 
 def get_global_desc_clip(fnames, device=torch.device('cpu')):
-    model, preprocess = clip.load("models/ViT-B-32.pt", device=device)
-    print("分簇模型加载成功")
+    try:
+        model, preprocess = clip.load("models/ViT-B-32.pt", device=device)
+        print("分簇模型加载成功")
+    except Exception as e:
+        print(f"模型加载失败: {e}")
+        # 返回一个空的特征向量或默认特征向量
+        return torch.zeros((len(fnames), 512)).float()
 
     model = model.eval().to(device)
     global_descs_dinov2 = []
+    
+    # 记录处理失败的图像索引
+    failed_indices = []
+    
     for i, img_fname_full in tqdm(enumerate(fnames), total=len(fnames)):
-        key = os.path.splitext(os.path.basename(img_fname_full))[0]
-        # 加载并预处理图像
-        timg = preprocess(Image.open(img_fname_full)).unsqueeze(0).to(device)
+        try:
+            key = os.path.splitext(os.path.basename(img_fname_full))[0]
+            # 加载并预处理图像
+            timg = preprocess(Image.open(img_fname_full)).unsqueeze(0).to(device)
 
-        # 提取特征
-        with torch.no_grad():
-            features = model.encode_image(timg)
-        # 归一化特征
-        features = features / features.norm(dim=-1, keepdim=True)
+            # 提取特征
+            with torch.no_grad():
+                features = model.encode_image(timg)
+            # 归一化特征
+            features = features / features.norm(dim=-1, keepdim=True)
 
-        global_descs_dinov2.append(features.detach().cpu())
+            global_descs_dinov2.append(features.detach().cpu())
+        except Exception as e:
+            print(f"处理图像 {img_fname_full} 失败: {e}")
+            # 记录失败的索引，并使用零向量替代
+            failed_indices.append(i)
+            # 创建一个零向量作为占位符
+            zero_feat = torch.zeros((1, 512), device='cpu').float()
+            global_descs_dinov2.append(zero_feat)
+    
+    # 输出失败图像的数量
+    if failed_indices:
+        print(f"警告: {len(failed_indices)}张图像处理失败")
+    
     return torch.cat(global_descs_dinov2, dim=0).float()
 
 def get_img_pairs_exhaustive(img_fnames):
@@ -476,6 +498,58 @@ def detect_sp_ensemble(lightglue_matcher, img_fnames, feature_dir='.featureout',
                 f_size[key] = data['size0'].cpu()
                 f_scale[key] = data['scale0'].cpu()
                 f_mask[key] = np.array([len(feats0_kpts), len(feats0_alike_pkts)])
+
+    return
+
+def detect_sp_ensemble_fast(lightglue_matcher, img_fnames, feature_dir='.featureout', num_features=4096, 
+                 resize_to=1024, device=torch.device('cpu')):
+    #集成方法 ALIke sp各提一半点 2048个
+    dtype = torch.float32
+
+    extractor_alike = ALIKED(max_num_keypoints=num_features, detection_threshold=0.3, 
+                    resize=resize_to).eval().to(device, dtype)
+    
+    if not os.path.isdir(feature_dir):
+        os.makedirs(feature_dir)
+    with h5py.File(f'{feature_dir}/keypoints_coarse.h5', mode='w') as f_kp_coarse, \
+         h5py.File(f'{feature_dir}/keypoints.h5', mode='w') as f_kp, \
+         h5py.File(f'{feature_dir}/descriptors.h5', mode='w') as f_desc, \
+         h5py.File(f'{feature_dir}/size.h5', mode='w') as f_size,\
+         h5py.File(f'{feature_dir}/scale.h5', mode='w') as f_scale,\
+         h5py.File(f'{feature_dir}/mask.h5', mode='w') as f_mask:
+        for img_path in tqdm(img_fnames):
+            img_fname = img_path.split('/')[-1]
+            img_fname = img_fname.split('\\')[-1]
+            key = img_fname
+
+            try:
+                with torch.inference_mode():
+                    kpts = np.zeros((num_features*2,2)).astype(np.float32)
+                    kpts_refine = np.zeros((num_features*2,2)).astype(np.float32)
+                    descs = np.zeros((num_features*2,256)).astype(np.float32)
+                    feats0, data = lightglue_matcher.extract(img_path,nms_radius=2)
+                    feats0_kpts = feats0['keypoints0'].reshape(-1, 2).detach().cpu().numpy()
+                    kpts[:len(feats0_kpts)] = feats0['keypoints0'].reshape(-1, 2).detach().cpu().numpy()
+                    kpts_refine[:len(feats0_kpts)] = feats0['keypoints_refine0'].reshape(-1, 2).detach().cpu().numpy()
+                    descs[:len(feats0_kpts)] = feats0['descriptors0'].reshape(len(feats0_kpts), -1).detach().cpu().numpy()
+
+                    image0 = load_torch_image(img_path, device=device).to(dtype)
+                    feats0_alike = extractor_alike.extract(image0)
+                    feats0_alike_pkts = feats0_alike['keypoints'].reshape(-1, 2).detach().cpu().numpy()
+                    kpts[num_features:num_features+len(feats0_alike_pkts)] = feats0_alike_pkts
+                    descs[num_features:num_features+len(feats0_alike_pkts),:128] = feats0_alike['descriptors'].reshape(len(feats0_alike_pkts), -1).detach().cpu().numpy()
+                    descs[num_features:num_features+len(feats0_alike_pkts),128:] = feats0_alike['descriptors'].reshape(len(feats0_alike_pkts), -1).detach().cpu().numpy()
+                    
+                    f_kp_coarse[key] = kpts
+                    f_kp[key] = kpts
+                    f_desc[key] = descs
+                    f_size[key] = data['size0'].cpu()
+                    f_scale[key] = data['scale0'].cpu()
+                    f_mask[key] = np.array([len(feats0_kpts), len(feats0_alike_pkts)])
+
+            except Exception as e:
+                print(f"Error processing image {img_fname}: {e}") 
+
 
     return
 
@@ -2684,6 +2758,253 @@ def match_with_gimlightglue_ensemble(lightglue_matcher, img_fnames, index_pairs,
 
     return match_matrix
 
+def match_with_gimlightglue_ensemble_fast(lightglue_matcher, img_fnames, index_pairs, feature_dir='.featureout', 
+                                           device=torch.device('cpu'), min_matches=30, 
+                                           tok_limit=1200, match_limit=4096, verbose=True, visualize=True):
+    """
+    使用批处理方式进行特征匹配，点数不会超过 max_points，但可能小于。
+    对于点数相同的匹配对进行批处理，点数不同的匹配对单独处理。
+
+    Args:
+        lightglue_matcher: LightGlue 匹配器实例
+        img_fnames: 图像文件名列表
+        index_pairs: 图像对索引列表
+        feature_dir: 特征存储目录
+        device: 设备 (CPU/GPU)
+        min_matches: 最小匹配数
+        batch_size: 批处理大小
+        batch_points: 每张图像的最大点数
+        verbose: 是否打印详细信息
+        visualize: 是否可视化匹配结果
+    """
+    def lg_forward(
+        lg_matcher,
+        desc1,
+        desc2,
+        lafs1,
+        lafs2,
+    ):
+        """Run forward.
+
+        Args:
+            desc1: Batch of descriptors of a shape :math:`(B1, D)`.
+            desc2: Batch of descriptors of a shape :math:`(B2, D)`.
+            lafs1: LAFs of a shape :math:`(1, B1, 2, 3)`.
+            lafs2: LAFs of a shape :math:`(1, B2, 2, 3)`.
+            hw1: Height/width of image.
+            hw2: Height/width of image.
+
+        Return:
+            - Descriptor distance of matching descriptors, shape of :math:`(B3, 1)`.
+            - Long tensor indexes of matching descriptors in desc1 and desc2,
+                shape of :math:`(B3, 2)` where :math:`0 <= B3 <= B1`.
+
+        """
+        keypoints1 = get_laf_center(lafs1)
+        keypoints2 = get_laf_center(lafs2)
+        dev = lafs1.device
+
+        hw1_ = keypoints1.max(dim=1)[0].squeeze().flip(0)
+        hw2_ = keypoints2.max(dim=1)[0].squeeze().flip(0)
+ 
+        ori0 = torch.deg2rad(get_laf_orientation(lafs1).reshape(1, -1))
+        ori0[ori0 < 0] += 2.0 * torch.pi
+        ori1 = torch.deg2rad(get_laf_orientation(lafs2).reshape(1, -1))
+        ori1[ori1 < 0] += 2.0 * torch.pi
+        input_dict = {
+            "image0": {
+                "keypoints": keypoints1,
+                "scales": get_laf_scale(lafs1).reshape(1, -1),
+                "oris": ori0,
+                "lafs": lafs1,
+                "descriptors": desc1,
+                "image_size": hw1_.flip(0).reshape(-1, 2).to(dev),
+            },
+            "image1": {
+                "keypoints": keypoints2,
+                "lafs": lafs2,
+                "scales": get_laf_scale(lafs2).reshape(1, -1),
+                "oris": ori1,
+                "descriptors": desc2,
+                "image_size": hw2_.flip(0).reshape(-1, 2).to(dev),
+            },
+        }
+        pred = lg_matcher.matcher(input_dict)
+        matches0_batch, mscores0_batch = pred["matches0"], pred["matching_scores0"]
+        matches0_batch_lst = []
+        mscores0_batch_lst = []
+        for idx, matches0 in enumerate(matches0_batch):
+            valid = matches0 > -1
+            matches = torch.stack([torch.where(valid)[0], matches0[valid]], -1)
+            matches0_batch_lst.append(matches)
+            mscores0_batch_lst.append(mscores0_batch[idx][valid])
+        
+        return mscores0_batch_lst, matches0_batch_lst
+    
+    
+    # 另外保存到一个字典中，格式为{key1-key2:[idxs,scores]}
+    match_dict = {}
+    match_matrix = np.zeros((len(img_fnames), len(img_fnames)), dtype=np.int32)
+    lg_matcher = KF.LightGlueMatcher("aliked", {"width_confidence": -1,
+                                        "depth_confidence": -1,
+                                        "mp": True if 'cuda' in str(device) else False}).eval().to(device)
+
+    # 加载特征数据
+    print("加载特征数据...")
+    features_data = {}
+    with h5py.File(f'{feature_dir}/keypoints_coarse.h5', mode='r') as f_kp, \
+         h5py.File(f'{feature_dir}/descriptors.h5', mode='r') as f_desc, \
+         h5py.File(f'{feature_dir}/size.h5', mode='r') as f_size, \
+         h5py.File(f'{feature_dir}/scale.h5', mode='r') as f_scale, \
+         h5py.File(f'{feature_dir}/mask.h5', mode='r') as f_mask:
+        for img_path in tqdm(img_fnames):
+            key = img_path.split('/')[-1].split('\\')[-1]
+            try:
+                features_data[key] = {
+                    'kp': torch.from_numpy(f_kp[key][...]).to(device),
+                    'desc': torch.from_numpy(f_desc[key][...]).to(device),
+                    'size': torch.from_numpy(f_size[key][...]).to(device),
+                    'scale': torch.from_numpy(f_scale[key][...]).to(device),
+                    'mask': torch.from_numpy(f_mask[key][...]).to(device)
+                }
+            except Exception as e:
+                print(f"Error loading features for {key}: {e}")
+                continue
+
+    run_pairs = 0
+    success_pairs = 0
+    # 批量处理点数相同的图像对
+    with h5py.File(f'{feature_dir}/matches.h5', mode='w') as f_match:
+        # 准备批次数据
+        for pair_idx in index_pairs:
+            idx1, idx2 = pair_idx
+            fname1, fname2 = img_fnames[idx1], img_fnames[idx2]
+            key1 = fname1.split('/')[-1].split('\\')[-1]
+            key2 = fname2.split('/')[-1].split('\\')[-1]
+            try:
+                # 获取图像特征
+                kp1 = features_data[key1]['kp']
+                kp2 = features_data[key2]['kp']
+                desc1 = features_data[key1]['desc']
+                desc2 = features_data[key2]['desc']
+                mask1 = features_data[key1]['mask'][0]
+                mask2 = features_data[key2]['mask'][0]
+
+                pred = {
+                    'keypoints0': kp1[:mask1][None],
+                    'keypoints1': kp2[:mask2][None],
+                    'descriptors0': desc1[:mask1][None],
+                    'descriptors1': desc2[:mask2][None],
+                    'size0': features_data[key1]['size'],
+                    'size1': features_data[key2]['size'],
+                    'scale0': features_data[key1]['scale'],
+                    'scale1': features_data[key2]['scale'],
+                }
+
+                
+                # pred_alike = {
+                #     'keypoints0': kp1[4096:][None],
+                #     'keypoints1': kp2[4096:][None],
+                #     'descriptors0': desc1[4096:,:128][None],
+                #     'descriptors1': desc2[4096:,:128][None],
+                #     'size0': features_data[key1]['size'],
+                #     'size1': features_data[key2]['size'],
+                #     'scale0': features_data[key1]['scale'],
+                #     'scale1': features_data[key2]['scale'],
+                # }
+
+                # 批量推理
+                with torch.inference_mode():
+                    dists, idxs = lightglue_matcher.match(pred)
+                    # batch_dists_fine, batch_idxs_fine = lightglue_matcher.match_batch_model(batch_preds,fine_tuned_matcher)
+                    # batch_dists, batch_idxs = lg_forward(lg_matcher, batch_preds_alike['descriptors0'].float(), batch_preds_alike['descriptors1'].float(),
+                    #         KF.laf_from_center_scale_ori(batch_preds_alike['keypoints0'].float()),
+                    #         KF.laf_from_center_scale_ori(batch_preds_alike['keypoints1'].float()))
+                    # batch_idxs += 4096
+                
+                # 对 batch_idxs 按照 batch_dists 分数排序并保留最大的 1500 个匹配
+                sorted_idxs = []
+                sorted_dists = []
+                if len(dists) > 0:
+                    # dists = torch.cat([batch_dists[i],batch_dists_fine[i]])
+                    # idxs = torch.cat([batch_idxs[i],batch_idxs_fine[i]])
+                    # dists[i], idxs[i] = match_nms(dists[i], idxs[i], batch_info[i], features_data, 1)
+                    sorted_indices = torch.argsort(dists, descending=True)
+                    sorted_dists_one = dists[sorted_indices]
+                    sorted_idxs_one = idxs[sorted_indices]
+                    top_k = min(tok_limit, len(sorted_dists_one))
+                    sorted_idxs.append(sorted_idxs_one[:top_k])
+                    sorted_dists.append(sorted_dists_one[:top_k])
+                else:
+                    sorted_idxs.append([])
+                    sorted_dists.append([])
+
+                batch_idxs = sorted_idxs   
+                batch_dists = sorted_dists
+                # 处理结果
+                run_pairs += 1
+                if len(batch_idxs[0]) == 0:
+                    continue
+                
+                idxs = batch_idxs[0]
+                match_scores = batch_dists[0]
+                
+                if verbose:
+                    print(f'{key1}-{key2}: {n_matches} matches')
+                
+                if len(idxs) < 800:
+                    # # 进行第二阶段匹配
+                    mkpts1 = features_data[key1]['kp'][idxs[:,0]]
+                    mkpts2 = features_data[key2]['kp'][idxs[:,1]]
+                    # 进行第二阶段匹配
+                    region_idxs, region_dists = second_match_ensemble(mkpts1.cpu().numpy(), mkpts2.cpu().numpy(), idxs, match_scores, features_data, key1, key2, lg_matcher)
+                    print(f'{key1}-{key2}')
+                    print("region_dists:", len(idxs), len(region_idxs))
+                    idxs = region_idxs
+                    match_scores = region_dists
+                n_matches = len(idxs)
+                # 保存匹配结果
+                if n_matches >= min_matches:
+                    # kpts0 = features_data[key1]['kp'][idxs[:,0]]
+                    # kpts1 = features_data[key2]['kp'][idxs[:,1]]
+                    # # robust fitting
+                    # _, mask = cv2.findFundamentalMat(kpts0.cpu().detach().numpy(),
+                    #                                 kpts1.cpu().detach().numpy(),
+                    #                                 cv2.USAC_MAGSAC, ransacReprojThreshold=1.0,
+                    #                                 confidence=0.999999, maxIters=10000)
+                    # mask = mask.ravel() > 0
+                    # idxs = idxs[mask]
+                    if len(idxs) >= min_matches:
+                        group = f_match.require_group(key1)
+                        group.create_dataset(key2, data=idxs.detach().cpu().numpy().reshape(-1, 2))
+                        match_matrix[idx1, idx2] = n_matches
+                        
+                        match_key = f"{key1}-{key2}"
+                        match_dict[match_key] = [idxs.detach().cpu().numpy(), match_scores.detach().cpu().numpy()]
+                        
+                        success_pairs += 1
+                            
+                        # 可视化匹配
+                        if visualize:
+                            vis_dir = os.path.join(feature_dir, 'visualizations')
+                            os.makedirs(vis_dir, exist_ok=True)
+                            save_path = os.path.join(vis_dir, f'{key1}_{key2}_matches.png')
+                            visualize_matches(
+                                fname1, fname2,
+                                features_data[key1]['kp'].cpu().numpy(),
+                                features_data[key2]['kp'].cpu().numpy(),
+                                idxs.cpu().numpy(),
+                                save_path
+                            )
+            except Exception as e:
+                print(f"Error processing pair {key1}-{key2}: {e}")
+                continue
+
+    with open(os.path.join(feature_dir, 'match_dict.pkl'), 'wb') as f:
+        pickle.dump(match_dict, f)
+
+    return match_matrix
+
 def match_with_lightglue_second(img_fnames, index_pairs, feature_dir='.featureout', 
                                            device=torch.device('cpu'), min_matches=20, batch_size=2, 
                                            tok_limit=1200, match_limit=4096, verbose=True, visualize=True):
@@ -4612,13 +4933,13 @@ for dataset, predictions in samples.items():
     feature_dir = os.path.join(workdir, 'featureout', dataset)
     os.makedirs(feature_dir, exist_ok=True)
 
-    if 0:
+    if 1:
         # try:
         t = time()
-        index_pairs = get_image_pairs_shortlist(images, sim_th=0.3, min_pairs=20, 
-                                                exhaustive_if_less=20, device=device)
-        # index_pairs = get_image_pairs_shortlist_clip(images, sim_th=0.76, min_pairs=20, 
-        #                                     exhaustive_if_less=20, device=device)
+        # index_pairs = get_image_pairs_shortlist(images, sim_th=0.3, min_pairs=20, 
+        #                                         exhaustive_if_less=20, device=device)
+        index_pairs = get_image_pairs_shortlist_clip(images, sim_th=0.76, min_pairs=20, 
+                                            exhaustive_if_less=20, device=device)
         timings['shortlisting'].append(time() - t)
         print(f'Shortlisting. Number of pairs to match: {len(index_pairs)}. Done in {time() - t:.4f} sec')
         gc.collect()
@@ -4633,7 +4954,7 @@ for dataset, predictions in samples.items():
         # timings['feature_matching'].append(time() - t)
         # print(f'Features matched in {time() - t:.4f} sec')
 
-        # lightglue_matcher = Lightglue_Matcher(device=device,num_features=4096)
+        lightglue_matcher = Lightglue_Matcher(device=device,num_features=4096)
         
         # t = time()
         # detect_aliked_second(images, feature_dir, 4096, device=device)
@@ -4643,8 +4964,8 @@ for dataset, predictions in samples.items():
         # index_pairs.append((9,3))
         # index_pairs.append((9,4))
         t = time()
-        detect_aliked(images, feature_dir, 4096, device=device)
-        # detect_sp_ensemble(lightglue_matcher, images, feature_dir, 4096, device=device)
+        # detect_aliked(images, feature_dir, 4096, device=device)
+        detect_sp_ensemble_fast(lightglue_matcher, images, feature_dir, 4096, device=device)
         timings['feature_detection'].append(time() - t)
         print(f'Features detected in {time() - t:.4f} sec')
 
@@ -4654,32 +4975,32 @@ for dataset, predictions in samples.items():
         # timings['feature_detection'].append(time() - t)
         # print(f'Features detected in {time() - t:.4f} sec')
             
-        t = time()
-        match_with_lightglue(images, index_pairs, feature_dir=feature_dir, device=device, verbose=False)
-        timings['feature_matching'].append(time() - t)
-        print(f'Features matched in {time() - t:.4f} sec')
-
-        # # 3. 微调LightGlue
         # t = time()
-        # fine_tuned_matcher = fine_tune_lightglue(
-        #     lightglue_matcher,
-        #     images, 
-        #     feature_dir, 
-        #     device,
-        #     batch_size=4,
-        #     epochs=1
-        # )
-        # lightglue_matcher.update_model(fine_tuned_matcher)
-        # print(f'模型微调完成，耗时 {time() - t:.4f} sec')
-        
-
-        # t = time()
-        # # match_matrix = match_with_gimloftr(lightglue_matcher, images, index_pairs, feature_dir=feature_dir, device=device, verbose=False)
-        # match_matrix = match_with_gimlightglue_ensemble(lightglue_matcher, images, index_pairs, feature_dir=feature_dir, device=device, verbose=False)
-        # # match_matrix = refine_matches(lightglue_matcher, images, index_pairs, feature_dir=feature_dir, device=device, verbose=False)
+        # match_with_lightglue(images, index_pairs, feature_dir=feature_dir, device=device, verbose=False)
         # timings['feature_matching'].append(time() - t)
         # print(f'Features matched in {time() - t:.4f} sec')
-        # print('match_matrix', match_matrix.sum())
+
+        # 3. 微调LightGlue
+        t = time()
+        fine_tuned_matcher = fine_tune_lightglue(
+            lightglue_matcher,
+            images, 
+            feature_dir, 
+            device,
+            batch_size=4,
+            epochs=1
+        )
+        lightglue_matcher.update_model(fine_tuned_matcher)
+        print(f'模型微调完成，耗时 {time() - t:.4f} sec')
+        
+
+        t = time()
+        # match_matrix = match_with_gimloftr(lightglue_matcher, images, index_pairs, feature_dir=feature_dir, device=device, verbose=False)
+        match_matrix = match_with_gimlightglue_ensemble_fast(lightglue_matcher, images, index_pairs, feature_dir=feature_dir, device=device, verbose=False)
+        # match_matrix = refine_matches(lightglue_matcher, images, index_pairs, feature_dir=feature_dir, device=device, verbose=False)
+        timings['feature_matching'].append(time() - t)
+        print(f'Features matched in {time() - t:.4f} sec')
+        print('match_matrix', match_matrix.sum())
 
     if 1:
         from data_process.filter_match import filter_matches_graph, visualize_filtered_matches, visualize_connections
@@ -4710,10 +5031,10 @@ for dataset, predictions in samples.items():
         # df = extract_match_features(matches_dict, features_data, output_csv_path)
         # cycle_csv_path = None
         # lr_model_path = './results/combined_model/'
-        lr_model_path = './lr_model'
-        lr_out_csv_path = os.path.join(feature_dir, 'lr_pred.csv')
-        filtered_matches_dict = filter_match_with_lr(matches_dict, features_data, model_dir=lr_model_path,threshold=0.4,output_csv=lr_out_csv_path)
-        filtered_matches_dict, cycle_error_data = filter_matches_graph(images, filtered_matches_dict, features_data, output_csv=cycle_csv_path)
+        # lr_model_path = './lr_model'
+        # lr_out_csv_path = os.path.join(feature_dir, 'lr_pred.csv')
+        # filtered_matches_dict = filter_match_with_lr(matches_dict, features_data, model_dir=lr_model_path,threshold=0.4,output_csv=lr_out_csv_path)
+        filtered_matches_dict, cycle_error_data = filter_matches_graph(images, matches_dict, features_data, output_csv=cycle_csv_path)
         
         # # 示例调用
         # key = "stairs_split_1_1710453930259.png"  # 你想作为中心的图像关键字

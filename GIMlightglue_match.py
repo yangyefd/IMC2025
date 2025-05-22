@@ -10,7 +10,7 @@ import torchvision.transforms.functional as F
 from os.path import join
 from networks.lightglue.superpoint import SuperPoint
 from networks.lightglue.models.matchers.lightglue import LightGlue
-from ultralytics import YOLO
+# from ultralytics import YOLO
 from data_process.person_mask import person_mask
 from networks.loftr.loftr import LoFTR
 from networks.loftr.misc import lower_config
@@ -550,12 +550,23 @@ class Lightglue_Matcher():
 
         detector = SuperPoint({
             'max_num_keypoints': num_features,
-            'force_num_keypoints': True,
-            'detection_threshold': 0.0,
+            'force_num_keypoints': False,
+            'detection_threshold': 0.01,
             'nms_radius': 2,
             "refinement_radius": 0,
             'trainable': False,
             "dense_outputs": False,
+            "remove_borders": 2,
+        })
+        detector_fine = SuperPoint({
+            'max_num_keypoints': num_features,
+            'force_num_keypoints': True,
+            'detection_threshold': 0.01,
+            'nms_radius': 2,
+            "refinement_radius": 0,
+            'trainable': False,
+            "dense_outputs": False,
+            "remove_borders": 2,
         })
         model = LightGlue({
             'filter_threshold': 0.1, # 0.1
@@ -564,15 +575,15 @@ class Lightglue_Matcher():
         })
 
 
-        model_loftr = LoFTR(lower_config(get_cfg_defaults())['loftr'])
+        # model_loftr = LoFTR(lower_config(get_cfg_defaults())['loftr'])
 
-        state_dict_loft = torch.load(checkpoints_path_loftr, map_location='cpu')
-        if 'state_dict' in state_dict_loft.keys(): state_dict_loft = state_dict_loft['state_dict']
-        model_loftr.load_state_dict(state_dict_loft)
+        # state_dict_loft = torch.load(checkpoints_path_loftr, map_location='cpu')
+        # if 'state_dict' in state_dict_loft.keys(): state_dict_loft = state_dict_loft['state_dict']
+        # model_loftr.load_state_dict(state_dict_loft)
 
 
-        # 加载YOLOv8-Seg模型
-        model_yolo = YOLO("./models/yolov8n-seg.pt")  # 使用轻量级分割模型
+        # # 加载YOLOv8-Seg模型
+        # model_yolo = YOLO("./models/yolov8n-seg.pt")  # 使用轻量级分割模型
 
         # weights path
         checkpoints_path = join('models', ckpt)
@@ -585,6 +596,7 @@ class Lightglue_Matcher():
             if k.startswith('superpoint.'):
                 state_dict[k.replace('superpoint.', '', 1)] = state_dict.pop(k)
         detector.load_state_dict(state_dict)
+        detector_fine.load_state_dict(state_dict)
 
         state_dict = torch.load(checkpoints_path, map_location='cpu')
         if 'state_dict' in state_dict.keys(): state_dict = state_dict['state_dict']
@@ -596,9 +608,10 @@ class Lightglue_Matcher():
         model.load_state_dict(state_dict)
 
         self.detector = detector.eval().to(device)
+        self.detector_fine = detector_fine.eval().to(device)
         self.model = model.eval().to(device)
-        self.model_yolo = model_yolo.eval().to(device)
-        self.model_loftr = model_loftr.eval().to(device)
+        # self.model_yolo = model_yolo.eval().to(device)
+        # self.model_loftr = model_loftr.eval().to(device)
 
     def loftr_extract(self, img_path0, resize=True):
         device = self.device
