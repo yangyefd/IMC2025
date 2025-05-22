@@ -1,5 +1,4 @@
-
-def filter_match_with_lr(matches_dict, features_data, model_dir='./results/featureout/stairs/lr_model', threshold=None):
+def filter_match_with_lr(matches_dict, features_data, model_dir='./results/featureout/stairs/lr_model', threshold=None, output_csv=None):
     """
     使用训练好的LR分类器对匹配对进行筛选
     
@@ -8,6 +7,7 @@ def filter_match_with_lr(matches_dict, features_data, model_dir='./results/featu
         features_data: 特征数据字典 {key: {'kp': kp, 'desc': desc, ...}}
         model_dir: LR模型及相关文件目录
         threshold: 分类阈值，若为None则使用最佳F1阈值
+        output_csv: 输出特征和预测分数的CSV文件路径
         
     Returns:
         filtered_matches_dict: 过滤后的匹配字典 {key1-key2: idxs}
@@ -49,13 +49,12 @@ def filter_match_with_lr(matches_dict, features_data, model_dir='./results/featu
         return matches_dict  # 如果模型加载失败，返回原始匹配
     
     # 2. 提取特征
-    # 创建一个临时文件来存储提取的特征
-    with tempfile.NamedTemporaryFile(suffix='.csv', delete=False) as tmp_file:
-        temp_csv_path = tmp_file.name
+    features_csv_path = output_csv if output_csv else tempfile.NamedTemporaryFile(suffix='.csv', delete=False).name
+    temp_file_created = not output_csv
     
     try:
         # 提取每个匹配对的特征
-        df = extract_match_features(matches_dict, features_data, temp_csv_path)
+        df = extract_match_features(matches_dict, features_data, features_csv_path)
         
         # 确保提取的特征与模型使用的特征一致
         missing_features = [f for f in feature_names if f not in df.columns]
@@ -71,11 +70,31 @@ def filter_match_with_lr(matches_dict, features_data, model_dir='./results/featu
         # 标准化特征
         X_scaled = scaler.transform(X)
         
+        nan_rows = np.isnan(X_scaled).any(axis=1)
+        nan_row_indices = np.where(nan_rows)[0]
+        if len(nan_row_indices) > 0:
+            X_scaled[nan_row_indices] = 0
+
         # 获取预测概率
         y_prob = model.predict_proba(X_scaled)[:, 1]
         
         # 使用阈值进行分类
         y_pred = (y_prob >= threshold).astype(int)
+        
+        # 将预测概率和预测结果添加到DataFrame
+        df['pred_prob'] = y_prob
+        df['prediction'] = y_pred
+        
+        # 如果指定了输出路径，保存特征和预测结果
+        if output_csv:
+            # 创建输出目录（如果不存在）
+            output_dir = os.path.dirname(output_csv)
+            if output_dir and not os.path.exists(output_dir):
+                os.makedirs(output_dir)
+                
+            # 保存合并后的数据到CSV
+            df.to_csv(output_csv, index=False)
+            print(f"特征数据和预测结果已保存至: {output_csv}")
         
         # 4. 根据预测结果过滤匹配对
         filtered_matches_dict = {}
@@ -102,9 +121,8 @@ def filter_match_with_lr(matches_dict, features_data, model_dir='./results/featu
         traceback.print_exc()
         filtered_matches_dict = matches_dict  # 出错时返回原始匹配
     finally:
-        # 删除临时文件
-        if os.path.exists(temp_csv_path):
-            os.remove(temp_csv_path)
+        # 只删除临时文件，不删除用户指定的输出文件
+        if temp_file_created and os.path.exists(features_csv_path):
+            os.remove(features_csv_path)
     
     return filtered_matches_dict
-

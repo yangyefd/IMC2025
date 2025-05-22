@@ -118,7 +118,7 @@ def main():
     """主函数"""
     # 解析命令行参数
     parser = argparse.ArgumentParser(description="评估LR分类器在各个场景的FAFR性能")
-    parser.add_argument("--model_dir", type=str, default="./results/combined_model",
+    parser.add_argument("--model_dir", type=str, default="./lr_model/",
                         help="模型目录路径")
     parser.add_argument("--data_dir", type=str, default="./results/featureout",
                         help="特征CSV所在目录")
@@ -186,6 +186,11 @@ def main():
     # 缩放特征
     X_scaled = scaler.transform(X)
     
+    nan_rows = np.isnan(X_scaled).any(axis=1)
+    nan_row_indices = np.where(nan_rows)[0]
+    if len(nan_row_indices) > 0:
+        X_scaled[nan_row_indices] = 0
+
     # 预测概率和类别
     all_data['pred_prob'] = model.predict_proba(X_scaled)[:, 1]
     all_data['pred'] = (all_data['pred_prob'] >= threshold).astype(int)

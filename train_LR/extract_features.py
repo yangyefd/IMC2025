@@ -214,23 +214,28 @@ def extract_match_features(match_dict, features_data, output_csv_path):
         # 5. 描述子特征
         # 提取匹配点的描述子，计算其相似度和一致性
         if hasattr(match_indices, 'dtype') and len(match_indices) > 0:
+            # 描述子相似度计算中添加安全检查
             try:
                 matched_desc1 = desc1[match_indices[:, 0]]
                 matched_desc2 = desc2[match_indices[:, 1]]
+                # 确保没有零向量导致归一化问题
+                norm1 = np.linalg.norm(matched_desc1, axis=1, keepdims=True)
+                norm2 = np.linalg.norm(matched_desc2, axis=1, keepdims=True)
                 
-                # 计算匹配描述子之间的余弦相似度
-                if isinstance(matched_desc1, torch.Tensor) and isinstance(matched_desc2, torch.Tensor):
-                    matched_desc1_norm = matched_desc1 / torch.norm(matched_desc1, dim=1, keepdim=True)
-                    matched_desc2_norm = matched_desc2 / torch.norm(matched_desc2, dim=1, keepdim=True)
-                    cosine_sims = torch.sum(matched_desc1_norm * matched_desc2_norm, dim=1).cpu().numpy()
-                else:
-                    matched_desc1_norm = matched_desc1 / np.linalg.norm(matched_desc1, axis=1, keepdims=True)
-                    matched_desc2_norm = matched_desc2 / np.linalg.norm(matched_desc2, axis=1, keepdims=True)
+                # 避免除以零
+                valid_indices = (norm1 > 1e-8).flatten() & (norm2 > 1e-8).flatten()
+                
+                if np.any(valid_indices):
+                    matched_desc1_norm = matched_desc1[valid_indices] / norm1[valid_indices]
+                    matched_desc2_norm = matched_desc2[valid_indices] / norm2[valid_indices]
                     cosine_sims = np.sum(matched_desc1_norm * matched_desc2_norm, axis=1)
-                
-                desc_sim_mean = np.mean(cosine_sims)
-                desc_sim_std = np.std(cosine_sims)
-            except (IndexError, ValueError, TypeError) as e:
+                    
+                    desc_sim_mean = np.mean(cosine_sims)
+                    desc_sim_std = np.std(cosine_sims)
+                else:
+                    desc_sim_mean = 0
+                    desc_sim_std = 0
+            except (IndexError, ValueError, TypeError, ZeroDivisionError) as e:
                 desc_sim_mean = 0
                 desc_sim_std = 0
         else:

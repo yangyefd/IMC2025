@@ -442,7 +442,7 @@ def load_torch_image(image_path, target_size):
     can_crop = orig_width >= target_width and orig_height >= target_height
     use_crop = can_crop and random.random() > 0.5
     
-    if use_crop:
+    if 0:
         # 随机裁剪
         max_x = orig_width - target_width
         max_y = orig_height - target_height
@@ -459,7 +459,7 @@ def load_torch_image(image_path, target_size):
         
         # 使用较小的比例进行缩放，确保图像完全在目标尺寸内
         ratio = min(width_ratio, height_ratio)
-        ratio = 1
+        # ratio = 1
         
         # 计算缩放后的尺寸
         new_width = int(orig_width * ratio)
