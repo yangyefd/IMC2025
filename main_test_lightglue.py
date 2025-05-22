@@ -165,23 +165,30 @@ def get_image_pairs_shortlist_clip(fnames, sim_th=0.6, min_pairs=20, exhaustive_
     num_imgs = len(fnames)
     if num_imgs <= exhaustive_if_less:
         return get_img_pairs_exhaustive(fnames)
-    descs = get_global_desc_clip(fnames, device=device)
-
-    dm = torch.cdist(descs, descs, p=2).detach().cpu().numpy()
-    mask = dm <= sim_th
+    descs = get_global_desc_clip(fnames, device=device)        
+    # 计算余弦相似度矩阵 (N x N)
+    similarity = torch.mm(descs, descs.t()).detach().cpu().numpy()
+    
+    # 相似度大于阈值的保留
+    mask = similarity >= sim_th
+    
     matching_list = []
     ar = np.arange(num_imgs)
-    already_there_set = []
+    
     for st_idx in range(num_imgs-1):
+        # 找出与当前图像相似度大于阈值的所有图像
         mask_idx = mask[st_idx]
         to_match = ar[mask_idx]
+        # 如果符合条件的图像太少，选择相似度最高的前min_pairs个
         if len(to_match) < min_pairs:
-            to_match = np.argsort(dm[st_idx])[:min_pairs]  
+            to_match = np.argsort(similarity[st_idx])[::-1][:min_pairs+1]  # 降序排列并取前min_pairs+1个
         for idx in to_match:
-            if st_idx == idx:
+            if st_idx == idx:  # 跳过自己与自己的匹配
                 continue
-            if dm[st_idx, idx] < 1000:
-                matching_list.append(tuple(sorted((st_idx, idx.item()))))
+            # 添加匹配对
+            matching_list.append(tuple(sorted((st_idx, idx.item() if hasattr(idx, 'item') else idx))))
+    
+    # 去重并排序
     return sorted(list(set(matching_list)))
 
 def detect_aliked(img_fnames, feature_dir='.featureout', num_features=4096, 
@@ -2881,7 +2888,8 @@ def match_with_gimlightglue_ensemble_fast(lightglue_matcher, img_fnames, index_p
             fname1, fname2 = img_fnames[idx1], img_fnames[idx2]
             key1 = fname1.split('/')[-1].split('\\')[-1]
             key2 = fname2.split('/')[-1].split('\\')[-1]
-            try:
+            # try:
+            if 1:
                 # 获取图像特征
                 kp1 = features_data[key1]['kp']
                 kp2 = features_data[key2]['kp']
@@ -2889,6 +2897,8 @@ def match_with_gimlightglue_ensemble_fast(lightglue_matcher, img_fnames, index_p
                 desc2 = features_data[key2]['desc']
                 mask1 = features_data[key1]['mask'][0]
                 mask2 = features_data[key2]['mask'][0]
+                mask1_alike = features_data[key1]['mask'][1]
+                mask2_alike = features_data[key2]['mask'][1]
 
                 pred = {
                     'keypoints0': kp1[:mask1][None],
@@ -2902,25 +2912,61 @@ def match_with_gimlightglue_ensemble_fast(lightglue_matcher, img_fnames, index_p
                 }
 
                 
-                # pred_alike = {
-                #     'keypoints0': kp1[4096:][None],
-                #     'keypoints1': kp2[4096:][None],
-                #     'descriptors0': desc1[4096:,:128][None],
-                #     'descriptors1': desc2[4096:,:128][None],
-                #     'size0': features_data[key1]['size'],
-                #     'size1': features_data[key2]['size'],
-                #     'scale0': features_data[key1]['scale'],
-                #     'scale1': features_data[key2]['scale'],
-                # }
+                pred_alike = {
+                    'keypoints0': kp1[4096:][:mask1_alike][None],
+                    'keypoints1': kp2[4096:][:mask2_alike][None],
+                    'descriptors0': desc1[4096:,:128][:mask1_alike][None],
+                    'descriptors1': desc2[4096:,:128][:mask2_alike][None],
+                    'size0': features_data[key1]['size'],
+                    'size1': features_data[key2]['size'],
+                    'scale0': features_data[key1]['scale'],
+                    'scale1': features_data[key2]['scale'],
+                }
 
                 # 批量推理
                 with torch.inference_mode():
                     dists, idxs = lightglue_matcher.match(pred)
+                    # dists_finetune, idxs_finetune = lightglue_matcher.match_finetune(pred)
                     # batch_dists_fine, batch_idxs_fine = lightglue_matcher.match_batch_model(batch_preds,fine_tuned_matcher)
-                    # batch_dists, batch_idxs = lg_forward(lg_matcher, batch_preds_alike['descriptors0'].float(), batch_preds_alike['descriptors1'].float(),
-                    #         KF.laf_from_center_scale_ori(batch_preds_alike['keypoints0'].float()),
-                    #         KF.laf_from_center_scale_ori(batch_preds_alike['keypoints1'].float()))
+                    dists_finetune, idxs_finetune = lg_matcher(pred_alike['descriptors0'].float(), pred_alike['descriptors1'].float(),
+                        KF.laf_from_center_scale_ori(pred_alike['keypoints0'].float()),
+                        KF.laf_from_center_scale_ori(pred_alike['keypoints1'].float()))
+                    idxs_finetune += 4096
                     # batch_idxs += 4096
+                    # 合并两个匹配结果
+                    if len(dists) > 0 and len(dists_finetune) > 0:
+                        # 合并匹配点和对应的置信度分数
+                        combined_dists = torch.cat([dists, dists_finetune])
+                        combined_idxs = torch.cat([idxs, idxs_finetune])
+                        
+                        # 对合并后的结果按置信度分数排序
+                        sorted_indices = torch.argsort(combined_dists, descending=True)
+                        sorted_dists = combined_dists[sorted_indices]
+                        sorted_idxs = combined_idxs[sorted_indices]
+                        
+                        # 去除可能的重复匹配
+                        unique_pairs = {}
+                        unique_indices = []
+                        for i, (idxs0, idxs1) in enumerate(sorted_idxs):
+                            pair_key = (int(idxs0), int(idxs1))
+                            if pair_key not in unique_pairs:
+                                unique_pairs[pair_key] = i
+                                unique_indices.append(i)
+                        
+                        # 提取去重后的结果
+                        final_dists = sorted_dists[unique_indices]
+                        final_idxs = sorted_idxs[unique_indices]
+                        
+                        # 限制最终匹配点数量
+                        top_k = min(tok_limit, len(final_dists))
+                        dists = final_dists[:top_k]
+                        idxs = final_idxs[:top_k]
+                    elif len(dists_finetune) > 0:
+                        # 只有微调模型的结果有效
+                        dists = dists_finetune
+                        idxs = idxs_finetune
+                    # 否则保持原始的 dists 和 idxs
+
                 
                 # 对 batch_idxs 按照 batch_dists 分数排序并保留最大的 1500 个匹配
                 sorted_idxs = []
@@ -2996,9 +3042,9 @@ def match_with_gimlightglue_ensemble_fast(lightglue_matcher, img_fnames, index_p
                                 idxs.cpu().numpy(),
                                 save_path
                             )
-            except Exception as e:
-                print(f"Error processing pair {key1}-{key2}: {e}")
-                continue
+            # except Exception as e:
+            #     print(f"Error processing pair {key1}-{key2}: {e}")
+            #     continue
 
     with open(os.path.join(feature_dir, 'match_dict.pkl'), 'wb') as f:
         pickle.dump(match_dict, f)
@@ -4980,18 +5026,18 @@ for dataset, predictions in samples.items():
         # timings['feature_matching'].append(time() - t)
         # print(f'Features matched in {time() - t:.4f} sec')
 
-        # 3. 微调LightGlue
-        t = time()
-        fine_tuned_matcher = fine_tune_lightglue(
-            lightglue_matcher,
-            images, 
-            feature_dir, 
-            device,
-            batch_size=4,
-            epochs=1
-        )
-        lightglue_matcher.update_model(fine_tuned_matcher)
-        print(f'模型微调完成，耗时 {time() - t:.4f} sec')
+        # # 3. 微调LightGlue
+        # t = time()
+        # fine_tuned_matcher = fine_tune_lightglue(
+        #     lightglue_matcher,
+        #     images, 
+        #     feature_dir, 
+        #     device,
+        #     batch_size=4,
+        #     epochs=1
+        # )
+        # lightglue_matcher.update_model(fine_tuned_matcher)
+        # print(f'模型微调完成，耗时 {time() - t:.4f} sec')
         
 
         t = time()

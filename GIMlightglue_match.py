@@ -1019,7 +1019,25 @@ class Lightglue_Matcher():
     # 修改Lightglue_Matcher类，添加更新模型的方法
     def update_model(self, new_model):
         """用微调后的模型更新当前模型"""
-        self.model = new_model.eval().to(self.device)
+        self.model_finetune = new_model.eval().to(self.device)
+
+    def match_finetune(self, pred_in):
+        pred = {}
+        kpts0 = torch.cat([kp / s for kp, s in zip(pred_in['keypoints0'], pred_in['scale0'][:, None])])
+        kpts1 = torch.cat([kp / s for kp, s in zip(pred_in['keypoints1'], pred_in['scale1'][:, None])])
+        pred['keypoints0'] = kpts0[None].float().to(self.device)
+        pred['keypoints1'] = kpts1[None].float().to(self.device)
+        pred['descriptors0'] = pred_in['descriptors0'].float().to(self.device)
+        pred['descriptors1'] = pred_in['descriptors1'].float().to(self.device)
+        with torch.no_grad():
+            with torch.cuda.amp.autocast():
+                pred.update(self.model_finetune({**pred, 
+                                **{'image_size0': pred_in['size0'],
+                                    'image_size1': pred_in['size1']}}))
+
+        matches = pred['matches'][0]
+        mconf = pred['scores'][0]
+        return mconf, matches 
 
     def match(self, pred_in):
         pred = {}
