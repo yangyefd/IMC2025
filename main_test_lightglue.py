@@ -2766,7 +2766,7 @@ def match_with_gimlightglue_ensemble(lightglue_matcher, img_fnames, index_pairs,
     return match_matrix
 
 def match_with_gimlightglue_ensemble_fast(lightglue_matcher, img_fnames, index_pairs, feature_dir='.featureout', 
-                                           device=torch.device('cpu'), min_matches=30, 
+                                           device=torch.device('cpu'), min_matches=20, 
                                            tok_limit=1200, match_limit=4096, verbose=True, visualize=True):
     """
     使用批处理方式进行特征匹配，点数不会超过 max_points，但可能小于。
@@ -2915,8 +2915,8 @@ def match_with_gimlightglue_ensemble_fast(lightglue_matcher, img_fnames, index_p
                 pred_alike = {
                     'keypoints0': kp1[4096:][:mask1_alike][None],
                     'keypoints1': kp2[4096:][:mask2_alike][None],
-                    'descriptors0': desc1[4096:,:128][:mask1_alike][None],
-                    'descriptors1': desc2[4096:,:128][:mask2_alike][None],
+                    'descriptors0': desc1[4096:,:128][:mask1_alike],
+                    'descriptors1': desc2[4096:,:128][:mask2_alike],
                     'size0': features_data[key1]['size'],
                     'size1': features_data[key2]['size'],
                     'scale0': features_data[key1]['scale'],
@@ -2931,8 +2931,9 @@ def match_with_gimlightglue_ensemble_fast(lightglue_matcher, img_fnames, index_p
                     dists_finetune, idxs_finetune = lg_matcher(pred_alike['descriptors0'].float(), pred_alike['descriptors1'].float(),
                         KF.laf_from_center_scale_ori(pred_alike['keypoints0'].float()),
                         KF.laf_from_center_scale_ori(pred_alike['keypoints1'].float()))
+                    dists_finetune = dists_finetune[:,0]
                     idxs_finetune += 4096
-                    # batch_idxs += 4096
+                    # # batch_idxs += 4096
                     # 合并两个匹配结果
                     if len(dists) > 0 and len(dists_finetune) > 0:
                         # 合并匹配点和对应的置信度分数
@@ -4953,7 +4954,7 @@ if is_OneTest:
     ]
 else:
     dataset_train_test_lst = [
-        'ETs',
+        # 'ETs',
         'stairs'
         # 'imc2023_heritage'
     ]
@@ -4979,13 +4980,13 @@ for dataset, predictions in samples.items():
     feature_dir = os.path.join(workdir, 'featureout', dataset)
     os.makedirs(feature_dir, exist_ok=True)
 
-    if 1:
+    if 0:
         # try:
         t = time()
-        # index_pairs = get_image_pairs_shortlist(images, sim_th=0.3, min_pairs=20, 
-        #                                         exhaustive_if_less=20, device=device)
-        index_pairs = get_image_pairs_shortlist_clip(images, sim_th=0.76, min_pairs=20, 
-                                            exhaustive_if_less=20, device=device)
+        index_pairs = get_image_pairs_shortlist(images, sim_th=0.3, min_pairs=20, 
+                                                exhaustive_if_less=20, device=device)
+        # index_pairs = get_image_pairs_shortlist_clip(images, sim_th=0.76, min_pairs=20, 
+        #                                     exhaustive_if_less=20, device=device)
         timings['shortlisting'].append(time() - t)
         print(f'Shortlisting. Number of pairs to match: {len(index_pairs)}. Done in {time() - t:.4f} sec')
         gc.collect()
@@ -5074,12 +5075,12 @@ for dataset, predictions in samples.items():
         from train_LR.predict import filter_match_with_lr
         output_csv_path = os.path.join(feature_dir, 'matches_features.csv')
         # 提取特征并保存到CSV
-        # df = extract_match_features(matches_dict, features_data, output_csv_path)
+        df = extract_match_features(matches_dict, features_data, output_csv_path)
         # cycle_csv_path = None
-        # lr_model_path = './results/combined_model/'
-        # lr_model_path = './lr_model'
-        # lr_out_csv_path = os.path.join(feature_dir, 'lr_pred.csv')
-        # filtered_matches_dict = filter_match_with_lr(matches_dict, features_data, model_dir=lr_model_path,threshold=0.4,output_csv=lr_out_csv_path)
+        lr_model_path = './results/combined_model/'
+        lr_model_path = './lr_model/LR_PB47'
+        lr_out_csv_path = os.path.join(feature_dir, 'lr_pred.csv')
+        filtered_matches_dict = filter_match_with_lr(matches_dict, features_data, model_dir=lr_model_path,threshold=0.3785,output_csv=lr_out_csv_path)
         filtered_matches_dict, cycle_error_data = filter_matches_graph(images, matches_dict, features_data, output_csv=cycle_csv_path)
         
         # # 示例调用
@@ -5087,7 +5088,7 @@ for dataset, predictions in samples.items():
         # visualize_connections(key, filtered_matches_dict, features_data, images, "connections_viz")
 
         # # 可视化过滤结果
-        visualize_filtered_matches(images, matches_dict, filtered_matches_dict, features_data, os.path.join(feature_dir, 'graph_results'))
+        # visualize_filtered_matches(images, matches_dict, filtered_matches_dict, features_data, os.path.join(feature_dir, 'graph_results'))
         
         import shutil
         # 备份原始 matches.h5 文件（如果存在）

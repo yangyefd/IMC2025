@@ -195,7 +195,7 @@ def extract_match_features(match_dict, features_data, output_csv_path):
             distances_2 = np.array(distances_2)
             
             # 计算距离比率和差异
-            distance_ratios = distances_2 / distances_1
+            distance_ratios = distances_2 / (distances_1 + 1e-8)
             distance_ratios = distance_ratios[~np.isnan(distance_ratios) & ~np.isinf(distance_ratios)]
             
             if len(distance_ratios) > 0:
