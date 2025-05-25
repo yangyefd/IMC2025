@@ -286,6 +286,55 @@ def preprocess(image: np.ndarray, grayscale: bool = False, resize_max: int = Non
     scale = np.array(size) / np.array(size_new)[::-1]
     return image, scale
 
+def preprocess_mr(image: np.ndarray, mr_lst=[1024, 1280, 840], grayscale: bool = False, resize_max: int = None,
+               dfactor: int = 8):
+    image = image.astype(np.float32, copy=False)
+    size = image.shape[:2][::-1]
+    scale = np.array([1.0, 1.0])
+
+    # resize_max = 4096
+    # if resize_max:
+    #     scale = resize_max / max(size)
+    #     if scale < 1.0:
+    #         size_new = tuple(int(round(x*scale)) for x in size)
+    #         image = resize_image(image, size_new, 'cv2_area')
+    #         scale = np.array(size) / np.array(size_new)
+    image_t = copy.deepcopy(image)
+    scale_lst = []
+    image_lst = []
+    for size_mr_one in mr_lst:
+        scale = size_mr_one / max(size)
+        size_new = tuple(int(round(x*scale)) for x in size)
+        image = resize_image(image_t, size_new, 'cv2_area')
+        scale = np.array(size) / np.array(size_new)
+
+
+        # resize_min = 1024
+        # if resize_min:
+        #     scale = resize_min / max(size)
+        #     scale = min(scale, 1.25)
+        #     if scale > 1.0:
+        #         size_new = tuple(int(round(x*scale)) for x in size)
+        #         image = resize_image(image, size_new, 'cv2_area')
+        #         scale = np.array(size) / np.array(size_new)
+                
+        if grayscale:
+            assert image.ndim == 2, image.shape
+            image = image[None]
+        else:
+            image = image.transpose((2, 0, 1))  # HxWxC to CxHxW
+        image = torch.from_numpy(image / 255.0).float()
+
+        # assure that the size is divisible by dfactor
+        size_new = tuple(map(
+                lambda x: int(x // dfactor * dfactor),
+                image.shape[-2:]))
+        image = F.resize(image, size=size_new)
+        scale = np.array(size) / np.array(size_new)[::-1]
+        scale_lst.append(scale)
+        image_lst.append(image)
+    return image_lst, scale_lst
+
 def preprocess_rot(image: np.ndarray, grayscale: bool = False, resize_max: int = None,
                dfactor: int = 8):
     image = image.astype(np.float32, copy=False)
@@ -561,7 +610,7 @@ class Lightglue_Matcher():
         detector_fine = SuperPoint({
             'max_num_keypoints': num_features,
             'force_num_keypoints': True,
-            'detection_threshold': 0.01,
+            'detection_threshold': 0.00,
             'nms_radius': 2,
             "refinement_radius": 0,
             'trainable': False,
@@ -660,7 +709,7 @@ class Lightglue_Matcher():
 
         return mconf, kpts0, kpts1
 
-    def extract(self, img_path0, nms_radius=3):
+    def extract(self, img_path0, nms_radius=3, force=False):
         device = self.device
         gray0 = read_image(img_path0, grayscale=True)
         gray0, scale0 = preprocess(gray0, grayscale=True)
@@ -678,14 +727,18 @@ class Lightglue_Matcher():
 
         pred = {}
         with torch.no_grad():
-            pred.update({k + '0': v for k, v in self.detector({
-                "image": data["gray0"],
-            }).items()})
+            if force:
+                pred.update({k + '0': v for k, v in self.detector_fine({
+                    "image": data["gray0"],
+                }).items()})
+            else:
+                pred.update({k + '0': v for k, v in self.detector({
+                    "image": data["gray0"],
+                }).items()})
 
         # 获取特征点和分数
         keypoints = pred['keypoints0']
         descriptors = pred['descriptors0']
-        keypoints_refine = pred['keypoints_refine0']
         scores = pred['scores0']
 
         # 按分数降序排序
@@ -740,17 +793,14 @@ class Lightglue_Matcher():
         # 重新排序特征点和描述符
         keypoints = keypoints[:,new_indices]
         descriptors = descriptors[:,new_indices]
-        keypoints_refine = keypoints_refine[:,new_indices]
         scores = scores[:, new_indices]
         
         # 更新排序后的结果
         pred['keypoints0'] = keypoints
         pred['descriptors0'] = descriptors
-        pred['keypoints_refine0'] = keypoints_refine
         pred['scores0'] = scores
 
         pred['keypoints0'] = torch.cat([kp * s for kp, s in zip(pred['keypoints0'], data['scale0'][:, None])])
-        pred['keypoints_refine0'] = torch.cat([kp * s for kp, s in zip(pred['keypoints_refine0'], data['scale0'][:, None])])
         
         return pred, data
 
@@ -910,15 +960,15 @@ class Lightglue_Matcher():
             data_rot.append(data)
         return pred_rot, data_rot
 
-    def extract_mr(self, img_path0, nms_radius=3):
-        #
+    def extract_mr(self, img_path0, nms_radius=3, mr_lst=[1024, 1280, 840]):
         device = self.device
-        gray0_mr, scales_mr = read_image_mr(img_path0, grayscale=True)
-        pred_mr = []
-        data_mr = []
-        for _rot, gray0 in enumerate(gray0_mr):
-            gray0, scale0 = preprocess(gray0, grayscale=True)
+        gray0 = read_image(img_path0, grayscale=True)
+        gray0_lst, scale0_lst = preprocess_mr(gray0, grayscale=True)
+        
 
+        pred_lst = []
+        data_lst = []
+        for gray0, scale0 in zip(gray0_lst, scale0_lst):
             gray0 = gray0.to(device)[None]
             scale0 = torch.tensor(scale0).to(device)[None]
 
@@ -1000,18 +1050,11 @@ class Lightglue_Matcher():
             pred['descriptors0'] = descriptors
             pred['scores0'] = scores
 
-            data['scale0_mr'] = scales_mr[_rot]
-            # pred['keypoints0'] *= scales_mr[_rot]
-            # data['scale0'] /= scales_mr[_rot]
             pred['keypoints0'] = torch.cat([kp * s for kp, s in zip(pred['keypoints0'], data['scale0'][:, None])])
-            pred['keypoints0_mr'] = pred['keypoints0']
-            pred['keypoints0'] = torch.cat([kp * s for kp, s in zip(pred['keypoints0'][None], data['scale0_mr'][:, None].to(device))])
             
-            # data['scale0'] *= scales_mr[_rot]
-
-            pred_mr.append(pred)
-            data_mr.append(data)
-        return pred_mr, data_mr
+            pred_lst.append(pred)
+            data_lst.append(data)
+        return pred_lst, data_lst
 
     def get_person_mask(self, img_path0):
         return person_mask(img_path0, self.model_yolo)
@@ -1075,7 +1118,7 @@ class Lightglue_Matcher():
         mconf = pred['scores']
         return mconf, matches
     
-    def match_batch_model(self, pred_in, model):
+    def match_batch_finetune(self, pred_in):
         pred = {}
         kpts0 = pred_in['keypoints0'] / pred_in['scale0']
         kpts1 = pred_in['keypoints1'] / pred_in['scale1']
@@ -1085,7 +1128,7 @@ class Lightglue_Matcher():
         pred['descriptors1'] = pred_in['descriptors1'].float().to(self.device)
         with torch.no_grad():
             with torch.cuda.amp.autocast():
-                pred.update(model({**pred, 
+                pred.update(self.model_finetune({**pred, 
                                 **{'image_size0': pred_in['size0'][:,0],
                                     'image_size1': pred_in['size1'][:,0]}}))
 

@@ -802,7 +802,7 @@ def check_match_correctness(kpts0, kpts1, matches, transform, threshold=1.5):
     
     return full_correctness
 
-def fine_tune_lightglue(lightglue_matcher, images, feature_dir, device, epochs=5, batch_size=16, num_pairs_per_image=1, learning_rate=1e-5):
+def fine_tune_lightglue(lightglue_matcher, images, feature_dir, device, epochs=5, batch_size=16, up_limits=15, num_pairs_per_image=1, learning_rate=1e-5):
     """对LightGlue进行自监督微调，使用批处理和半精度"""
     print(f"开始对LightGlue进行高效自监督微调 ({len(images)}张图像)")
     
@@ -876,7 +876,7 @@ def fine_tune_lightglue(lightglue_matcher, images, feature_dir, device, epochs=5
         batch_count = 0
         optimizer.zero_grad()
 
-        if finetune_num > 15:
+        if finetune_num > up_limits:
             break
         print(f"Epoch {epoch+1}/{epochs}")
         progress_bar = tqdm.tqdm(dataloader)
@@ -887,7 +887,7 @@ def fine_tune_lightglue(lightglue_matcher, images, feature_dir, device, epochs=5
                 eval_batch = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
             
             finetune_num += 1
-            if finetune_num > 15:
+            if finetune_num > up_limits:
                 break
             # 将数据移动到设备并转换为半精度
             imgs0 = batch['image0'].to(device)
