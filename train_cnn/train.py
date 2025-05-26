@@ -41,39 +41,83 @@ class ImagePairDataset(Dataset):
         self.target_size = target_size
         self.transform = transform
         self.augment = augment
+        self.path_cache = {}
         
+        # 构建完整的文件索引 - 一次性构建，避免重复搜索
+        self._build_file_index()
+
         # 数据增强变换（适用于灰度图像）
         self.augment_transforms = transforms.Compose([
-            transforms.RandomRotation(degrees=15),
-            transforms.ColorJitter(brightness=0.2, contrast=0.2),  # 移除saturation和hue
-            transforms.RandomApply([transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 2.0))], p=0.3),
-            transforms.RandomApply([transforms.RandomAdjustSharpness(sharpness_factor=2)], p=0.3),
+            # 几何变换
+            transforms.RandomRotation(degrees=30, interpolation=transforms.InterpolationMode.BILINEAR, fill=0),
+            transforms.RandomAffine(
+                degrees=0,  # 旋转已在上面处理
+                translate=(0.1, 0.1),  # 平移
+                scale=(0.8, 1.2),      # 缩放
+                shear=15,              # 错切变换
+                interpolation=transforms.InterpolationMode.BILINEAR,
+                fill=0
+            ),
+            transforms.RandomPerspective(distortion_scale=0.3, p=0.3, interpolation=transforms.InterpolationMode.BILINEAR, fill=0),
+            
+            # 像素级变换
+            transforms.ColorJitter(brightness=0.3, contrast=0.3),  # 亮度和对比度
+            transforms.RandomApply([
+                transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 2.0))
+            ], p=0.3),
+            transforms.RandomApply([
+                transforms.RandomAdjustSharpness(sharpness_factor=2)
+            ], p=0.3),
+            
+            # 噪声和遮挡
+            transforms.RandomApply([
+                transforms.Lambda(self._add_gaussian_noise)
+            ], p=0.2),
+            transforms.RandomErasing(p=0.2, scale=(0.02, 0.1), ratio=(0.3, 3.3), value=0),
         ])
+        
+        # 高级几何变换（使用OpenCV实现）
+        self.opencv_augments = [
+            self._random_elastic_transform,
+            self._random_grid_distortion,
+            self._random_barrel_distortion,
+        ]
         
         print(f"数据集加载完成: {len(self.df)} 个样本")
         print(f"正样本: {self.df['label'].sum()}, 负样本: {len(self.df) - self.df['label'].sum()}")
     
     def __len__(self):
+        """返回数据集大小"""
         return len(self.df)
     
-    def find_image_path(self, key):
-        """根据key查找图像路径"""
-
-        path = os.path.join(self.image_base_dir, key)
-        if os.path.exists(path):
-            return path
+    def _build_file_index(self):
+        """构建文件名到路径的索引，大幅提升查找速度"""
+        print("正在构建文件索引...")
+        self.file_index = {}
+        extensions = {'.png'}
         
-        # 在子目录中递归查找
+        file_count = 0
         for root, dirs, files in os.walk(self.image_base_dir):
-            for dir in dirs:
-                path = os.path.join(root, dir, key)
-                if os.path.exists(path):
-                    return path
-           
-        return None
+            for file in files:
+                file_lower = file.lower()
+                if any(file_lower.endswith(ext) for ext in extensions):
+                    # 使用不带扩展名的文件名作为key
+                    key = file
+                    full_path = os.path.join(root, file)
+                    self.file_index[key] = full_path
+                    file_count += 1
+        
+        print(f"文件索引构建完成，找到 {file_count} 个图像文件")
     
+    def find_image_path(self, key):
+        """快速查找图像路径 - O(1)时间复杂度"""
+        return self.file_index.get(key, None)
+
     def resize_keep_ratio(self, image, target_size):
         """保持长宽比的resize，并满足倍数限制"""
+        if image is None:
+            return np.zeros((target_size, target_size), dtype=np.uint8)
+        
         h, w = image.shape[:2]
         
         # 计算缩放比例
@@ -112,6 +156,137 @@ class ImagePairDataset(Dataset):
         
         return resized
     
+    def _add_gaussian_noise(self, img):
+        """添加高斯噪声"""
+        if isinstance(img, Image.Image):
+            img_array = np.array(img)
+        else:
+            img_array = img
+        
+        noise = np.random.normal(0, 25, img_array.shape).astype(np.uint8)
+        noisy_img = np.clip(img_array.astype(np.int16) + noise, 0, 255).astype(np.uint8)
+        
+        return Image.fromarray(noisy_img) if isinstance(img, Image.Image) else noisy_img
+    
+    def _random_elastic_transform(self, image, alpha=50, sigma=5):
+        """弹性变换"""
+        if np.random.random() > 0.3:
+            return image
+        
+        if isinstance(image, Image.Image):
+            image = np.array(image)
+        
+        h, w = image.shape[:2]
+        
+        # 生成随机位移场
+        dx = np.random.uniform(-1, 1, (h//8, w//8)) * alpha
+        dy = np.random.uniform(-1, 1, (h//8, w//8)) * alpha
+        
+        # 高斯平滑
+        dx = cv2.GaussianBlur(dx, (0, 0), sigma)
+        dy = cv2.GaussianBlur(dy, (0, 0), sigma)
+        
+        # 调整大小到原图尺寸
+        dx = cv2.resize(dx, (w, h))
+        dy = cv2.resize(dy, (w, h))
+        
+        # 创建映射网格
+        x, y = np.meshgrid(np.arange(w), np.arange(h))
+        map_x = (x + dx).astype(np.float32)
+        map_y = (y + dy).astype(np.float32)
+        
+        # 应用变换
+        transformed = cv2.remap(image, map_x, map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        
+        return Image.fromarray(transformed)
+    
+    def _random_grid_distortion(self, image, grid_size=4, distortion_strength=0.3):
+        """网格扭曲变换"""
+        if np.random.random() > 0.2:
+            return image
+        
+        if isinstance(image, Image.Image):
+            image = np.array(image)
+        
+        h, w = image.shape[:2]
+        
+        # 创建网格点
+        grid_h, grid_w = grid_size + 1, grid_size + 1
+        src_points = []
+        dst_points = []
+        
+        for i in range(grid_h):
+            for j in range(grid_w):
+                src_x = j * w // grid_size
+                src_y = i * h // grid_size
+                src_points.append([src_x, src_y])
+                
+                # 添加随机扰动
+                if i == 0 or i == grid_h-1 or j == 0 or j == grid_w-1:
+                    # 边界点不扰动
+                    dst_points.append([src_x, src_y])
+                else:
+                    dst_x = src_x + np.random.uniform(-1, 1) * distortion_strength * w / grid_size
+                    dst_y = src_y + np.random.uniform(-1, 1) * distortion_strength * h / grid_size
+                    dst_points.append([dst_x, dst_y])
+        
+        src_points = np.array(src_points, dtype=np.float32)
+        dst_points = np.array(dst_points, dtype=np.float32)
+        
+        # 使用薄板样条插值进行变换
+        try:
+            tps = cv2.createThinPlateSplineShapeTransformer()
+            tps.estimateTransformation(dst_points.reshape(1, -1, 2), src_points.reshape(1, -1, 2), [])
+            transformed = tps.warpImage(image)
+        except:
+            # 如果TPS失败，使用仿射变换作为备选
+            if len(src_points) >= 3:
+                M = cv2.getAffineTransform(src_points[:3], dst_points[:3])
+                transformed = cv2.warpAffine(image, M, (w, h), borderValue=0)
+            else:
+                transformed = image
+        
+        return Image.fromarray(transformed)
+    
+    def _random_barrel_distortion(self, image, strength=0.3):
+        """桶形/枕形失真"""
+        if np.random.random() > 0.2:
+            return image
+        
+        if isinstance(image, Image.Image):
+            image = np.array(image)
+        
+        h, w = image.shape[:2]
+        
+        # 失真参数
+        k1 = np.random.uniform(-strength, strength)
+        k2 = np.random.uniform(-strength/2, strength/2)
+        
+        # 相机矩阵
+        cx, cy = w/2, h/2
+        fx, fy = w, h
+        
+        camera_matrix = np.array([[fx, 0, cx],
+                                 [0, fy, cy],
+                                 [0, 0, 1]], dtype=np.float32)
+        
+        dist_coeffs = np.array([k1, k2, 0, 0, 0], dtype=np.float32)
+        
+        # 应用畸变校正（实际上是添加畸变）
+        map1, map2 = cv2.initUndistortRectifyMap(camera_matrix, -dist_coeffs, None, camera_matrix, (w, h), cv2.CV_16SC2)
+        transformed = cv2.remap(image, map1, map2, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        
+        return Image.fromarray(transformed)
+    
+    def _apply_opencv_augmentations(self, image):
+        """应用OpenCV增强"""
+        if np.random.random() > 0.3:
+            return image
+        
+        # 随机选择一个增强方法
+        augment_func = np.random.choice(self.opencv_augments)
+        return augment_func(image)
+    
     def __getitem__(self, idx):
         row = self.df.iloc[idx]
         key1, key2, label = row['key1'], row['key2'], row['label']
@@ -122,8 +297,7 @@ class ImagePairDataset(Dataset):
         
         if img1_path is None or img2_path is None:
             # 如果找不到图像，返回黑色图像（灰度）
-            img1 = np.zeros((self.target_size, self.target_size), dtype=np.uint8)
-            img2 = np.zeros((self.target_size, self.target_size), dtype=np.uint8)
+            exit()
         else:
             # 加载图像并转换为灰度
             img1 = cv2.imread(img1_path, cv2.IMREAD_GRAYSCALE)
@@ -142,17 +316,21 @@ class ImagePairDataset(Dataset):
         img2_pil = Image.fromarray(img2)
         
         # 数据增强
-        if self.augment and self.transform:
-            # 对两张图像应用相同的随机变换
-            seed = np.random.randint(2147483647)
+        if self.augment:
+            if np.random.random() < 0.7:  # 70%概率同步增强
+                seed = np.random.randint(2147483647)
+                torch.manual_seed(seed)
+                img1_pil = self.augment_transforms(img1_pil)
+                torch.manual_seed(seed)
+                img2_pil = self.augment_transforms(img2_pil)
+            else:  # 30%概率独立增强
+                img1_pil = self.augment_transforms(img1_pil)
+                img2_pil = self.augment_transforms(img2_pil)
             
-            torch.manual_seed(seed)
-            np.random.seed(seed)
-            img1_pil = self.augment_transforms(img1_pil)
-            
-            torch.manual_seed(seed)
-            np.random.seed(seed)
-            img2_pil = self.augment_transforms(img2_pil)
+            # 应用OpenCV增强（概率性应用）
+            if np.random.random() < 0.3:
+                img1_pil = self._apply_opencv_augmentations(img1_pil)
+                img2_pil = self._apply_opencv_augmentations(img2_pil)
         
         # 应用基础变换
         if self.transform:
@@ -166,7 +344,6 @@ class ImagePairDataset(Dataset):
         combined = torch.cat([img1_tensor, img2_tensor], dim=0)  # Shape: [2, H, W]
         
         return combined, torch.tensor(label, dtype=torch.float32)
-
 
 class SiameseNet(nn.Module):
     """孪生网络架构用于图像匹配（灰度图像版本）"""
@@ -296,6 +473,8 @@ def train_epoch(model, dataloader, criterion, optimizer, device, epoch):
         all_preds.extend(preds.cpu().numpy())
         all_labels.extend(labels.cpu().numpy())
         
+        #概率性展示图像对
+
         # 更新进度条
         progress_bar.set_postfix({'Loss': f'{loss.item():.4f}'})
     
