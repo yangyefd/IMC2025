@@ -1882,7 +1882,7 @@ def filter_clusters_by_match_count_with_scores(idxs, scores, features_data, key1
 #     """
 
 
-def second_match_ensemble(mkpts1, mkpts2, idxs, match_scores, features_data, key1, key2, lg_matcher, startidx=4096):
+def second_match_ensemble(mkpts1, mkpts2, idxs, match_scores, features_data, key1, key2, lg_matcher, device, startidx=4096):
     """二次匹配函数，增加索引映射功能确保结果与原始特征点对应
     
     Args:
@@ -2116,12 +2116,12 @@ def second_match_ensemble(mkpts1, mkpts2, idxs, match_scores, features_data, key
         
         # 执行第二阶段匹配
         region_pred = {
-            'keypoints0': region_kp1[:3072][None],
-            'keypoints1': region_kp2[:3072][None],
-            'descriptors0': region_desc1[:3072,:128],
-            'descriptors1': region_desc2[:3072,:128],
-            'size0': features_data[key1]['size'],
-            'size1': features_data[key2]['size'],
+            'keypoints0': region_kp1[:3072][None].to(device),
+            'keypoints1': region_kp2[:3072][None].to(device),
+            'descriptors0': region_desc1[:3072,:128].to(device),
+            'descriptors1': region_desc2[:3072,:128].to(device),
+            'size0': features_data[key1]['size'].to(device),
+            'size1': features_data[key2]['size'].to(device),
             # 'scale0': features_data[key1]['scale'],
             # 'scale1': features_data[key2]['scale'],
         }
@@ -2911,11 +2911,11 @@ def match_with_gimlightglue_ensemble_withfine(lightglue_matcher, img_fnames, ind
             try:
                 key = img_path.split('/')[-1].split('\\')[-1]
                 features_data[key] = {
-                    'kp': torch.from_numpy(f_kp[key][...]).to(device),
-                    'desc': torch.from_numpy(f_desc[key][...]).to(device),
-                    'size': torch.from_numpy(f_size[key][...]).to(device),
-                    'scale': torch.from_numpy(f_scale[key][...]).to(device),
-                    'mask': torch.from_numpy(f_mask[key][...]).to(device)
+                    'kp': torch.from_numpy(f_kp[key][...]),
+                    'desc': torch.from_numpy(f_desc[key][...]),
+                    'size': torch.from_numpy(f_size[key][...]),
+                    'scale': torch.from_numpy(f_scale[key][...]),
+                    'mask': torch.from_numpy(f_mask[key][...])
                 }
             except Exception as e:
                 print(f"Error loading features for {key}: {e}")
@@ -3055,14 +3055,14 @@ def match_with_gimlightglue_ensemble_withfine(lightglue_matcher, img_fnames, ind
                     mask1_alike = features_data[key1]['mask'][-1]
                     mask2_alike = features_data[key2]['mask'][-1]
                     pred_alike = {
-                        'keypoints0': kp1[4096:][:mask1_alike][None],
-                        'keypoints1': kp2[4096:][:mask2_alike][None],
-                        'descriptors0': desc1[4096:,:128][:mask1_alike],
-                        'descriptors1': desc2[4096:,:128][:mask2_alike],
+                        'keypoints0': kp1[4096:][:mask1_alike][None].to(device),
+                        'keypoints1': kp2[4096:][:mask2_alike][None].to(device),
+                        'descriptors0': desc1[4096:,:128][:mask1_alike].to(device),
+                        'descriptors1': desc2[4096:,:128][:mask2_alike].to(device),
                     }
 
                     # 批量推理
-                    with torch.inference_mode():
+                    with torch.inference_mode(), torch.cuda.amp.autocast():
                         dists_finetune, idxs_finetune = lg_matcher(pred_alike['descriptors0'].float(), pred_alike['descriptors1'].float(),
                             KF.laf_from_center_scale_ori(pred_alike['keypoints0'].float()),
                             KF.laf_from_center_scale_ori(pred_alike['keypoints1'].float()))
@@ -3115,7 +3115,7 @@ def match_with_gimlightglue_ensemble_withfine(lightglue_matcher, img_fnames, ind
                         mkpts1 = features_data[key1]['kp'][idxs[:,0]]
                         mkpts2 = features_data[key2]['kp'][idxs[:,1]]
                         # 进行第二阶段匹配
-                        region_idxs, region_dists = second_match_ensemble(mkpts1.cpu().numpy(), mkpts2.cpu().numpy(), idxs, match_scores, features_data, key1, key2, lg_matcher)
+                        region_idxs, region_dists = second_match_ensemble(mkpts1.cpu().numpy(), mkpts2.cpu().numpy(), idxs, match_scores, features_data, key1, key2, lg_matcher, device)
                         print(f'{key1}-{key2}')
                         print("region_dists:", len(idxs), len(region_idxs))
                         idxs = region_idxs[:1500]
@@ -3442,9 +3442,9 @@ def match_with_gimlightglue_ensemble_fast(lightglue_matcher, img_fnames, index_p
                                 idxs.cpu().numpy(),
                                 save_path
                             )
-            # except Exception as e:
-            #     print(f"Error processing pair {key1}-{key2}: {e}")
-            #     continue
+            except Exception as e:
+                print(f"Error processing pair {key1}-{key2}: {e}")
+                continue
 
     with open(os.path.join(feature_dir, 'match_dict.pkl'), 'wb') as f:
         pickle.dump(match_dict, f)
