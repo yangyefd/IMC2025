@@ -2986,19 +2986,19 @@ def match_with_gimlightglue_ensemble_withfine(lightglue_matcher, img_fnames, ind
                 }
 
                 
-                pred_alike = {
-                    'keypoints0': kp1[4096:][None],
-                    'keypoints1': kp2[4096:][None],
-                    'descriptors0': desc1[4096:,:128][None],
-                    'descriptors1': desc2[4096:,:128][None],
-                    'size0': features_data[key1]['size'],
-                    'size1': features_data[key2]['size'],
-                    'scale0': features_data[key1]['scale'],
-                    'scale1': features_data[key2]['scale'],
-                }
+                # pred_alike = {
+                #     'keypoints0': kp1[4096:][None],
+                #     'keypoints1': kp2[4096:][None],
+                #     'descriptors0': desc1[4096:,:128][None],
+                #     'descriptors1': desc2[4096:,:128][None],
+                #     'size0': features_data[key1]['size'],
+                #     'size1': features_data[key2]['size'],
+                #     'scale0': features_data[key1]['scale'],
+                #     'scale1': features_data[key2]['scale'],
+                # }
 
                 batch_data.append(pred)
-                batch_data_alike.append(pred_alike)
+                # batch_data_alike.append(pred_alike)
                 batch_info.append((idx1, idx2, key1, key2, fname1, fname2))
             
             # 批量匹配
@@ -3025,32 +3025,60 @@ def match_with_gimlightglue_ensemble_withfine(lightglue_matcher, img_fnames, ind
             #     'scale0': torch.stack([data['scale0'] for data in batch_data_alike], dim=0).to(device),
             #     'scale1': torch.stack([data['scale1'] for data in batch_data_alike], dim=0).to(device),
             # }
-            # 合并批次预测数据
-            batch_preds_finetune = {
-                'keypoints0': torch.cat([data['keypoints0'][:,:1024] for data in batch_data], dim=0).to(device),
-                'keypoints1': torch.cat([data['keypoints1'][:,:1024] for data in batch_data], dim=0).to(device),
-                'descriptors0': torch.cat([data['descriptors0'][:,:1024] for data in batch_data], dim=0).to(device),
-                'descriptors1': torch.cat([data['descriptors1'][:,:1024] for data in batch_data], dim=0).to(device),
-                'size0': torch.stack([data['size0'] for data in batch_data], dim=0).to(device),
-                'size1': torch.stack([data['size1'] for data in batch_data], dim=0).to(device),
-                'scale0': torch.stack([data['scale0'] for data in batch_data], dim=0).to(device),
-                'scale1': torch.stack([data['scale1'] for data in batch_data], dim=0).to(device),
-            }
+            # # 合并批次预测数据
+            # batch_preds_finetune = {
+            #     'keypoints0': torch.cat([data['keypoints0'][:,:1024] for data in batch_data], dim=0).to(device),
+            #     'keypoints1': torch.cat([data['keypoints1'][:,:1024] for data in batch_data], dim=0).to(device),
+            #     'descriptors0': torch.cat([data['descriptors0'][:,:1024] for data in batch_data], dim=0).to(device),
+            #     'descriptors1': torch.cat([data['descriptors1'][:,:1024] for data in batch_data], dim=0).to(device),
+            #     'size0': torch.stack([data['size0'] for data in batch_data], dim=0).to(device),
+            #     'size1': torch.stack([data['size1'] for data in batch_data], dim=0).to(device),
+            #     'scale0': torch.stack([data['scale0'] for data in batch_data], dim=0).to(device),
+            #     'scale1': torch.stack([data['scale1'] for data in batch_data], dim=0).to(device),
+            # }
 
             # 批量推理
             with torch.inference_mode():
                 batch_dists, batch_idxs = lightglue_matcher.match_batch(batch_preds)
-                batch_dists_fine, batch_idxs_fine = lightglue_matcher.match_batch_finetune(batch_preds_finetune)
-                # batch_dists, batch_idxs = lg_forward(lg_matcher, batch_preds_alike['descriptors0'].float(), batch_preds_alike['descriptors1'].float(),
+                # batch_dists_fine, batch_idxs_fine = lightglue_matcher.match_batch_finetune(batch_preds_finetune)
+                # batch_dists_fine, batch_idxs_fine = lg_forward(lg_matcher, batch_preds_alike['descriptors0'].float(), batch_preds_alike['descriptors1'].float(),
                 #         KF.laf_from_center_scale_ori(batch_preds_alike['keypoints0'].float()),
                 #         KF.laf_from_center_scale_ori(batch_preds_alike['keypoints1'].float()))
-                # batch_idxs += 4096
             
+            batch_dists_fine = []
+            batch_idxs_fine = []
+            for i, (idx1, idx2, key1, key2, fname1, fname2) in enumerate(batch_info):
+                    kp1 = features_data[key1]['kp']
+                    kp2 = features_data[key2]['kp']
+                    desc1 = features_data[key1]['desc']
+                    desc2 = features_data[key2]['desc']
+                    mask1_alike = features_data[key1]['mask'][-1]
+                    mask2_alike = features_data[key2]['mask'][-1]
+                    pred_alike = {
+                        'keypoints0': kp1[4096:][:mask1_alike][None],
+                        'keypoints1': kp2[4096:][:mask2_alike][None],
+                        'descriptors0': desc1[4096:,:128][:mask1_alike],
+                        'descriptors1': desc2[4096:,:128][:mask2_alike],
+                    }
+
+                    # 批量推理
+                    with torch.inference_mode():
+                        dists_finetune, idxs_finetune = lg_matcher(pred_alike['descriptors0'].float(), pred_alike['descriptors1'].float(),
+                            KF.laf_from_center_scale_ori(pred_alike['keypoints0'].float()),
+                            KF.laf_from_center_scale_ori(pred_alike['keypoints1'].float()))
+                        dists_finetune = dists_finetune[:,0]
+                        idxs_finetune += 4096
+                        dists_finetune_mask = dists_finetune > 0.2
+                        idxs_finetune = idxs_finetune[dists_finetune_mask]
+                        dists_finetune = dists_finetune[dists_finetune_mask]
+                        batch_dists_fine.append(dists_finetune)
+                        batch_idxs_fine.append(idxs_finetune)
+                    
             # 对 batch_idxs 按照 batch_dists 分数排序并保留最大的 1500 个匹配
             sorted_idxs = []
             sorted_dists = []
             for i in range(len(batch_dists)):
-                if len(batch_dists[i]) > 0:
+                if len(batch_dists[i]) > 0 or len(batch_dists_fine[i]) > 0:
                     dists = torch.cat([batch_dists[i],batch_dists_fine[i]])
                     idxs = torch.cat([batch_idxs[i],batch_idxs_fine[i]])
 
@@ -3258,8 +3286,8 @@ def match_with_gimlightglue_ensemble_fast(lightglue_matcher, img_fnames, index_p
             fname1, fname2 = img_fnames[idx1], img_fnames[idx2]
             key1 = fname1.split('/')[-1].split('\\')[-1]
             key2 = fname2.split('/')[-1].split('\\')[-1]
-            # try:
-            if 1:
+            try:
+            # if 1:
                 # 获取图像特征
                 kp1 = features_data[key1]['kp']
                 kp2 = features_data[key2]['kp']
@@ -3281,12 +3309,11 @@ def match_with_gimlightglue_ensemble_fast(lightglue_matcher, img_fnames, index_p
                     'scale1': features_data[key2]['scale'],
                 }
 
-                
                 pred_alike = {
-                    'keypoints0': kp1[4096:][:mask1_alike][None],
-                    'keypoints1': kp2[4096:][:mask2_alike][None],
-                    'descriptors0': desc1[4096:,:128][:mask1_alike],
-                    'descriptors1': desc2[4096:,:128][:mask2_alike],
+                    'keypoints0': kp1[4096:][:mask1_alike][:2048][None],
+                    'keypoints1': kp2[4096:][:mask2_alike][:2048][None],
+                    'descriptors0': desc1[4096:,:128][:mask1_alike][:2048],
+                    'descriptors1': desc2[4096:,:128][:mask2_alike][:2048],
                     'size0': features_data[key1]['size'],
                     'size1': features_data[key2]['size'],
                     'scale0': features_data[key1]['scale'],
@@ -3310,6 +3337,8 @@ def match_with_gimlightglue_ensemble_fast(lightglue_matcher, img_fnames, index_p
                         combined_dists = torch.cat([dists, dists_finetune])
                         combined_idxs = torch.cat([idxs, idxs_finetune])
                         
+                        match_info = (idx1, idx2, key1, key2, fname1, fname2)
+                        combined_dists, combined_idxs = match_nms(combined_dists, combined_idxs, match_info, features_data, 1)
                         # 对合并后的结果按置信度分数排序
                         sorted_indices = torch.argsort(combined_dists, descending=True)
                         sorted_dists = combined_dists[sorted_indices]
@@ -5662,7 +5691,7 @@ for dataset, predictions in samples.items():
 
         t = time()
         # match_matrix = match_with_gimloftr(lightglue_matcher, images, index_pairs, feature_dir=feature_dir, device=device, verbose=False)
-        match_matrix = match_with_gimlightglue_ensemble(lightglue_matcher, images, index_pairs, feature_dir=feature_dir, device=device, verbose=False)
+        match_matrix = match_with_gimlightglue_ensemble_withfine(lightglue_matcher, images, index_pairs, feature_dir=feature_dir, device=device, verbose=False)
         # match_matrix = refine_matches(lightglue_matcher, images, index_pairs, feature_dir=feature_dir, device=device, verbose=False)
         timings['feature_matching'].append(time() - t)
         print(f'Features matched in {time() - t:.4f} sec')
