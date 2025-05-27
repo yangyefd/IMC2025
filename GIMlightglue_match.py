@@ -637,7 +637,7 @@ class Lightglue_Matcher():
         # weights path
         checkpoints_path = join('models', ckpt)
 
-        state_dict = torch.load(checkpoints_path, map_location='cpu')
+        state_dict = torch.load(checkpoints_path, map_location='cpu', weights_only=True)
         if 'state_dict' in state_dict.keys(): state_dict = state_dict['state_dict']
         for k in list(state_dict.keys()):
             if k.startswith('model.'):
@@ -647,7 +647,7 @@ class Lightglue_Matcher():
         detector.load_state_dict(state_dict)
         detector_fine.load_state_dict(state_dict)
 
-        state_dict = torch.load(checkpoints_path, map_location='cpu')
+        state_dict = torch.load(checkpoints_path, map_location='cpu', weights_only=True)
         if 'state_dict' in state_dict.keys(): state_dict = state_dict['state_dict']
         for k in list(state_dict.keys()):
             if k.startswith('superpoint.'):
@@ -1073,7 +1073,7 @@ class Lightglue_Matcher():
         pred['descriptors0'] = pred_in['descriptors0'].float().to(self.device)
         pred['descriptors1'] = pred_in['descriptors1'].float().to(self.device)
         with torch.no_grad():
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast('cuda'):
                 pred.update(self.model_finetune({**pred, 
                                 **{'image_size0': pred_in['size0'],
                                     'image_size1': pred_in['size1']}}))
@@ -1091,7 +1091,7 @@ class Lightglue_Matcher():
         pred['descriptors0'] = pred_in['descriptors0'].float().to(self.device)
         pred['descriptors1'] = pred_in['descriptors1'].float().to(self.device)
         with torch.no_grad():
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast('cuda'):
                 pred.update(self.model({**pred, 
                                 **{'image_size0': pred_in['size0'],
                                     'image_size1': pred_in['size1']}}))
@@ -1109,7 +1109,7 @@ class Lightglue_Matcher():
         pred['descriptors0'] = pred_in['descriptors0'].float().to(self.device)
         pred['descriptors1'] = pred_in['descriptors1'].float().to(self.device)
         with torch.no_grad():
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast('cuda'):
                 pred.update(self.model({**pred, 
                                 **{'image_size0': pred_in['size0'][:,0],
                                     'image_size1': pred_in['size1'][:,0]}}))
@@ -1127,7 +1127,7 @@ class Lightglue_Matcher():
         pred['descriptors0'] = pred_in['descriptors0'].float().to(self.device)
         pred['descriptors1'] = pred_in['descriptors1'].float().to(self.device)
         with torch.no_grad():
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast('cuda'):
                 pred.update(self.model_finetune({**pred, 
                                 **{'image_size0': pred_in['size0'][:,0],
                                     'image_size1': pred_in['size1'][:,0]}}))

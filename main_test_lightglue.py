@@ -496,10 +496,14 @@ def detect_sp_ensemble(lightglue_matcher, img_fnames, feature_dir='.featureout',
                     image0 = load_torch_image(img_path, device=device).to(dtype)
                     feats0_alike = extractor_alike.extract(image0)
                     feats0_alike_pkts = feats0_alike['keypoints'].reshape(-1, 2).detach().cpu().numpy()
-                    kpts[num_features:num_features+len(feats0_alike_pkts)] = feats0_alike_pkts
-                    descs[num_features:num_features+len(feats0_alike_pkts),:128] = feats0_alike['descriptors'].reshape(len(feats0_alike_pkts), -1).detach().cpu().numpy()
-                    descs[num_features:num_features+len(feats0_alike_pkts),128:] = feats0_alike['descriptors'].reshape(len(feats0_alike_pkts), -1).detach().cpu().numpy()
-
+                    feats0_alike_descs = feats0_alike['descriptors'].reshape(len(feats0_alike_pkts), -1).detach().cpu().numpy()
+                    #使用分数对点和描述的位置进行排序，分高的放前
+                    feats0_alike_pkts_score = feats0_alike['keypoint_scores'].reshape(-1).detach().cpu().numpy()
+                    sort_idx = np.argsort(feats0_alike_pkts_score)[::-1]
+                    kpts[num_features:num_features+len(feats0_alike_pkts)] = feats0_alike_pkts[sort_idx]
+                    descs[num_features:num_features+len(feats0_alike_pkts),:128] = feats0_alike_descs[sort_idx]
+                    descs[num_features:num_features+len(feats0_alike_pkts),128:] = feats0_alike_descs[sort_idx]
+                    
                     f_kp[key] = kpts
                     f_desc[key] = descs
                     f_size[key] = data['size0'].cpu()
@@ -2902,6 +2906,7 @@ def match_with_gimlightglue_ensemble_withfine(lightglue_matcher, img_fnames, ind
     # 加载特征数据
     print("加载特征数据...")
     features_data = {}
+    load_gpu_first = len(img_fnames) < 500
     with h5py.File(f'{feature_dir}/keypoints.h5', mode='r') as f_kp, \
          h5py.File(f'{feature_dir}/descriptors.h5', mode='r') as f_desc, \
          h5py.File(f'{feature_dir}/size.h5', mode='r') as f_size, \
@@ -2910,13 +2915,22 @@ def match_with_gimlightglue_ensemble_withfine(lightglue_matcher, img_fnames, ind
         for img_path in tqdm(img_fnames):
             try:
                 key = img_path.split('/')[-1].split('\\')[-1]
-                features_data[key] = {
-                    'kp': torch.from_numpy(f_kp[key][...]),
-                    'desc': torch.from_numpy(f_desc[key][...]),
-                    'size': torch.from_numpy(f_size[key][...]),
-                    'scale': torch.from_numpy(f_scale[key][...]),
-                    'mask': torch.from_numpy(f_mask[key][...])
-                }
+                if load_gpu_first:
+                    features_data[key] = {
+                        'kp': torch.from_numpy(f_kp[key][...]).to(device),
+                        'desc': torch.from_numpy(f_desc[key][...]).to(device),
+                        'size': torch.from_numpy(f_size[key][...]).to(device),
+                        'scale': torch.from_numpy(f_scale[key][...]).to(device),
+                        'mask': torch.from_numpy(f_mask[key][...]).to(device)
+                    }
+                else:
+                    features_data[key] = {
+                        'kp': torch.from_numpy(f_kp[key][...]),
+                        'desc': torch.from_numpy(f_desc[key][...]),
+                        'size': torch.from_numpy(f_size[key][...]),
+                        'scale': torch.from_numpy(f_scale[key][...]),
+                        'mask': torch.from_numpy(f_mask[key][...])
+                    }
             except Exception as e:
                 print(f"Error loading features for {key}: {e}")
                 continue
@@ -3056,13 +3070,13 @@ def match_with_gimlightglue_ensemble_withfine(lightglue_matcher, img_fnames, ind
                     mask2_alike = features_data[key2]['mask'][-1]
                     pred_alike = {
                         'keypoints0': kp1[4096:][:mask1_alike][None].to(device),
-                        'keypoints1': kp2[4096:][:mask2_alike][None].to(device),
+                        'keypoints1': kp2[4096:][:mask2_alike][:2048][None].to(device),
                         'descriptors0': desc1[4096:,:128][:mask1_alike].to(device),
-                        'descriptors1': desc2[4096:,:128][:mask2_alike].to(device),
+                        'descriptors1': desc2[4096:,:128][:mask2_alike][:2048].to(device),
                     }
 
                     # 批量推理
-                    with torch.inference_mode(), torch.cuda.amp.autocast():
+                    with torch.inference_mode(), torch.amp.autocast('cuda'):
                         dists_finetune, idxs_finetune = lg_matcher(pred_alike['descriptors0'].float(), pred_alike['descriptors1'].float(),
                             KF.laf_from_center_scale_ori(pred_alike['keypoints0'].float()),
                             KF.laf_from_center_scale_ori(pred_alike['keypoints1'].float()))
@@ -5602,7 +5616,7 @@ if is_OneTest:
 else:
     dataset_train_test_lst = [
         'ETs',
-        # 'stairs'
+        'stairs'
         # 'imc2023_heritage'
     ]
     
@@ -5627,7 +5641,7 @@ for dataset, predictions in samples.items():
     feature_dir = os.path.join(workdir, 'featureout', dataset)
     os.makedirs(feature_dir, exist_ok=True)
 
-    if 1:
+    if 0:
         # try:
         t = time()
         # index_pairs = get_image_pairs_shortlist(images, sim_th=0.3, min_pairs=20, 
@@ -5637,6 +5651,10 @@ for dataset, predictions in samples.items():
         timings['shortlisting'].append(time() - t)
         print(f'Shortlisting. Number of pairs to match: {len(index_pairs)}. Done in {time() - t:.4f} sec')
         gc.collect()
+        # Clear CUDA cache if available
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()  # Wait for all operations to complete
 
         # t = time()
         # detect_aliked(images, feature_dir, 4096, device=device)
@@ -5662,6 +5680,12 @@ for dataset, predictions in samples.items():
         detect_sp_ensemble(lightglue_matcher, images, feature_dir, 4096, device=device)
         timings['feature_detection'].append(time() - t)
         print(f'Features detected in {time() - t:.4f} sec')
+        gc.collect()
+        # Clear CUDA cache if available
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()  # Wait for all operations to complete
+
 
         # t = time()
         # # detect_aliked(images, feature_dir, 4096, device=device)
@@ -5689,6 +5713,7 @@ for dataset, predictions in samples.items():
         # print(f'模型微调完成，耗时 {time() - t:.4f} sec')
         
 
+        # from safe_match import match_with_gimlightglue_ensemble_withfine_safe
         t = time()
         # match_matrix = match_with_gimloftr(lightglue_matcher, images, index_pairs, feature_dir=feature_dir, device=device, verbose=False)
         match_matrix = match_with_gimlightglue_ensemble_withfine(lightglue_matcher, images, index_pairs, feature_dir=feature_dir, device=device, verbose=False)
@@ -5696,6 +5721,7 @@ for dataset, predictions in samples.items():
         timings['feature_matching'].append(time() - t)
         print(f'Features matched in {time() - t:.4f} sec')
         print('match_matrix', match_matrix.sum())
+        gc.collect()
 
     if 1:
         from data_process.filter_match import filter_matches_graph, visualize_filtered_matches, visualize_connections
@@ -5719,8 +5745,9 @@ for dataset, predictions in samples.items():
             matches_dict = pickle.load(f)
         cycle_csv_path = os.path.join(feature_dir, 'matches.csv')
 
-        from train_LR.extract_features import extract_match_features
-        from train_LR.predict import filter_match_with_lr
+        # from train_LR.extract_features import extract_match_features
+        # from train_LR.predict import filter_match_with_lr
+        from train_cnn.inference import filter_matches_with_cnn
         output_csv_path = os.path.join(feature_dir, 'matches_features.csv')
         # 提取特征并保存到CSV
         # df = extract_match_features(matches_dict, features_data, output_csv_path)
@@ -5729,7 +5756,9 @@ for dataset, predictions in samples.items():
         # lr_model_path = './lr_model/LR_PB47'
         # lr_out_csv_path = os.path.join(feature_dir, 'lr_pred.csv')
         # filtered_matches_dict = filter_match_with_lr(matches_dict, features_data, model_dir=lr_model_path,threshold=0.3785,output_csv=lr_out_csv_path)
-        filtered_matches_dict, cycle_error_data = filter_matches_graph(images, matches_dict, features_data, output_csv=cycle_csv_path)
+        cnn_model_path = './models/cnn_best_model.pth'
+        filtered_matches_dict = filter_matches_with_cnn(cnn_model_path, matches_dict, images, threshold=0.001)
+        filtered_matches_dict, cycle_error_data = filter_matches_graph(images, filtered_matches_dict, features_data, output_csv=cycle_csv_path, verbose=False)
         
         # # 示例调用
         # key = "stairs_split_1_1710453930259.png"  # 你想作为中心的图像关键字
