@@ -2813,7 +2813,7 @@ def match_with_gimlightglue_ensemble(lightglue_matcher, img_fnames, index_pairs,
     return match_matrix
 
 def match_with_gimlightglue_ensemble_withfine(lightglue_matcher, img_fnames, index_pairs, feature_dir='.featureout', 
-                                           device=torch.device('cpu'), min_matches=20, batch_size=2, 
+                                           device=torch.device('cpu'), min_matches=25, batch_size=2, 
                                            tok_limit=1200, match_limit=4096, verbose=True, visualize=True):
     """
     使用批处理方式进行特征匹配，点数不会超过 max_points，但可能小于。
@@ -2990,9 +2990,9 @@ def match_with_gimlightglue_ensemble_withfine(lightglue_matcher, img_fnames, ind
 
                 pred = {
                     'keypoints0': kp1[:match_limit][None],
-                    'keypoints1': kp2[:match_limit][None],
+                    'keypoints1': kp2[:match_limit][:3072][None],
                     'descriptors0': desc1[:match_limit][None],
-                    'descriptors1': desc2[:match_limit][None],
+                    'descriptors1': desc2[:match_limit][:3072][None],
                     'size0': features_data[key1]['size'],
                     'size1': features_data[key2]['size'],
                     'scale0': features_data[key1]['scale'],
@@ -3070,9 +3070,9 @@ def match_with_gimlightglue_ensemble_withfine(lightglue_matcher, img_fnames, ind
                     mask2_alike = features_data[key2]['mask'][-1]
                     pred_alike = {
                         'keypoints0': kp1[4096:][:mask1_alike][None].to(device),
-                        'keypoints1': kp2[4096:][:mask2_alike][:2048][None].to(device),
+                        'keypoints1': kp2[4096:][:mask2_alike][None].to(device),
                         'descriptors0': desc1[4096:,:128][:mask1_alike].to(device),
-                        'descriptors1': desc2[4096:,:128][:mask2_alike][:2048].to(device),
+                        'descriptors1': desc2[4096:,:128][:mask2_alike].to(device),
                     }
 
                     # 批量推理
@@ -3093,11 +3093,11 @@ def match_with_gimlightglue_ensemble_withfine(lightglue_matcher, img_fnames, ind
             sorted_dists = []
             for i in range(len(batch_dists)):
                 if len(batch_dists[i]) > 0 or len(batch_dists_fine[i]) > 0:
-                    dists = torch.cat([batch_dists[i],batch_dists_fine[i]])
-                    idxs = torch.cat([batch_idxs[i],batch_idxs_fine[i]])
+                    # dists = torch.cat([batch_dists[i],batch_dists_fine[i]])
+                    # idxs = torch.cat([batch_idxs[i],batch_idxs_fine[i]])
 
-                    # dists = batch_dists[i]
-                    # idxs = batch_idxs[i]
+                    dists = batch_dists_fine[i]
+                    idxs = batch_idxs_fine[i]
                     dists, idxs = match_nms(dists, idxs, batch_info[i], features_data, 1)
                     sorted_indices = torch.argsort(dists, descending=True)
                     sorted_dists_one = dists[sorted_indices]
@@ -5616,7 +5616,7 @@ if is_OneTest:
 else:
     dataset_train_test_lst = [
         'ETs',
-        'stairs'
+        # 'stairs'
         # 'imc2023_heritage'
     ]
     
@@ -5641,7 +5641,7 @@ for dataset, predictions in samples.items():
     feature_dir = os.path.join(workdir, 'featureout', dataset)
     os.makedirs(feature_dir, exist_ok=True)
 
-    if 0:
+    if 1:
         # try:
         t = time()
         # index_pairs = get_image_pairs_shortlist(images, sim_th=0.3, min_pairs=20, 
@@ -5698,19 +5698,20 @@ for dataset, predictions in samples.items():
         # timings['feature_matching'].append(time() - t)
         # print(f'Features matched in {time() - t:.4f} sec')
 
-        # # 3. 微调LightGlue
-        # t = time()
-        # fine_tuned_matcher = fine_tune_lightglue(
-        #     lightglue_matcher,
-        #     images, 
-        #     feature_dir, 
-        #     device,
-        #     batch_size=4,
-        #     epochs=1,
-        #     up_limits=15
-        # )
-        # lightglue_matcher.update_model(fine_tuned_matcher)
-        # print(f'模型微调完成，耗时 {time() - t:.4f} sec')
+        # 3. 微调LightGlue
+        t = time()
+        finetuned_model = fine_tune_lightglue(
+            lightglue_matcher,
+            images, 
+            feature_dir, 
+            device,
+            batch_size=4,
+            epochs=1,
+            up_limits=15
+        )
+        lightglue_matcher.update_model(finetuned_model)
+        lightglue_matcher.model = finetuned_model
+        print(f'模型微调完成，耗时 {time() - t:.4f} sec')
         
 
         # from safe_match import match_with_gimlightglue_ensemble_withfine_safe
@@ -5756,8 +5757,8 @@ for dataset, predictions in samples.items():
         # lr_model_path = './lr_model/LR_PB47'
         # lr_out_csv_path = os.path.join(feature_dir, 'lr_pred.csv')
         # filtered_matches_dict = filter_match_with_lr(matches_dict, features_data, model_dir=lr_model_path,threshold=0.3785,output_csv=lr_out_csv_path)
-        cnn_model_path = './models/cnn_best_model.pth'
-        filtered_matches_dict = filter_matches_with_cnn(cnn_model_path, matches_dict, images, threshold=0.001)
+        cnn_model_path = './models/0528_best_model.pth'
+        filtered_matches_dict = filter_matches_with_cnn(cnn_model_path, matches_dict, images, threshold=0.001, max_filter_ratio=0.25)
         filtered_matches_dict, cycle_error_data = filter_matches_graph(images, filtered_matches_dict, features_data, output_csv=cycle_csv_path, verbose=False)
         
         # # 示例调用

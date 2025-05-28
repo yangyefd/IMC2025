@@ -157,7 +157,7 @@ class SiameseNet(nn.Module):
         
         return output
 
-def filter_matches_with_cnn(model_path, matches_dict, frames, threshold=0.5, 
+def filter_matches_with_cnn(model_path, matches_dict, frames, threshold=0.5, max_filter_ratio=0.2,
                                      batch_size=16, target_size=800, device=None, num_workers=0):
     """内存优化版本的CNN过滤函数"""
     
@@ -247,12 +247,12 @@ def filter_matches_with_cnn(model_path, matches_dict, frames, threshold=0.5,
     print(f"阈值 {threshold} 过滤结果: {threshold_pass_count}/{total_count} ({threshold_pass_rate*100:.1f}%)")
     print(f"没通过阈值的比例: {threshold_fail_rate*100:.1f}%")
 
-    if threshold_fail_rate > 0.2:  # 如果没通过阈值的匹配对超过20%
+    if threshold_fail_rate > max_filter_ratio:  # 如果没通过阈值的匹配对超过20%
         print("没通过阈值的匹配对超过20%，认为分类器可能存在泛化性问题...")
         print("只过滤分数最低的20%...")
         # 去除分数最低的20%
         sorted_indices = np.argsort(all_scores)  # 从低到高排序
-        remove_count = int(total_count * 0.2)  # 要移除的数量
+        remove_count = int(total_count * max_filter_ratio)  # 要移除的数量
         remove_indices = sorted_indices[:remove_count]  # 最低的20%
         
         final_mask = np.ones(len(all_scores), dtype=bool)
@@ -278,6 +278,8 @@ def filter_matches_with_cnn(model_path, matches_dict, frames, threshold=0.5,
                 original_data[0] if len(original_data) > 0 else [],
                 original_data[1] if len(original_data) > 1 else []
             ]
+        else:
+            print(f"移除匹配对 {key}，CNN分数: {score:.4f}")
 
     print(f"过滤完成: {len(filtered_matches)}/{len(matches_dict)} 匹配对通过CNN过滤")
     print(f"保留率: {len(filtered_matches)/len(matches_dict)*100:.1f}%")

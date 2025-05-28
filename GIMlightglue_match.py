@@ -247,19 +247,19 @@ def preprocess(image: np.ndarray, grayscale: bool = False, resize_max: int = Non
     size = image.shape[:2][::-1]
     scale = np.array([1.0, 1.0])
 
-    # resize_max = 4096
-    # if resize_max:
-    #     scale = resize_max / max(size)
-    #     if scale < 1.0:
-    #         size_new = tuple(int(round(x*scale)) for x in size)
-    #         image = resize_image(image, size_new, 'cv2_area')
-    #         scale = np.array(size) / np.array(size_new)
+    resize_max = 4096
+    if resize_max:
+        scale = resize_max / max(size)
+        if scale < 1.0:
+            size_new = tuple(int(round(x*scale)) for x in size)
+            image = resize_image(image, size_new, 'cv2_area')
+            scale = np.array(size) / np.array(size_new)
 
 
-    scale = 1024 / max(size)
-    size_new = tuple(int(round(x*scale)) for x in size)
-    image = resize_image(image, size_new, 'cv2_area')
-    scale = np.array(size) / np.array(size_new)
+    # scale = 1024 / max(size)
+    # size_new = tuple(int(round(x*scale)) for x in size)
+    # image = resize_image(image, size_new, 'cv2_area')
+    # scale = np.array(size) / np.array(size_new)
 
 
     # resize_min = 1024
@@ -619,7 +619,7 @@ class Lightglue_Matcher():
         })
         model = LightGlue({
             'filter_threshold': 0.1, # 0.1
-            'flash': False,
+            'flash': True,
             'checkpointed': True,
         })
 

@@ -688,6 +688,1149 @@ def visualize_cycle_consistency_with_tracks(cycle_name, frames, matches_dict, fe
 # def filter_similarity(frames, matches_dict, features_data_t, threshold=0.6):
 #     #计算每个匹配对的语义相似度：基于匹配对所在位置的patch的相似度，使用clip模型
 
+def filter_matches_graph_v2(frames, matches_dict, features_data_t, threshold=0.6, distance_threshold=10.0, inlier_ratio_threshold=0.8, verbose=True, output_csv=None):
+    """
+    基于图结构的匹配过滤函数，去除不一致的匹配及靠近不一致匹配的点对。
+    
+    Args:
+        frames: 图像路径列表
+        matches_dict: 匹配字典 {key1-key2: matches} idxs:matches[0] match_scores:matches[1]
+        features_data: 特征数据字典
+        threshold: 循环一致性过滤阈值
+        distance_threshold: 空间邻近过滤的距离阈值（像素）
+        verbose: 是否输出详细统计信息
+        output_csv: 保存循环误差统计的CSV文件路径
+        
+    Returns:
+        filtered_matches_dict: 过滤后的匹配字典
+    """
+    import numpy as np
+    import pandas as pd
+    import os
+    import csv
+    import copy
+    from collections import defaultdict
+    import networkx as nx
+
+    features_data_t = copy.deepcopy(features_data_t)
+    features_data = {k: {"kp":v['kp'].cpu().numpy(),"desc":v['desc'].cpu().numpy()} for k, v in features_data_t.items()}
+    
+    # 记录每个阶段的匹配数量
+    stats = defaultdict(dict)
+        
+    # 新字典去除matches_dict中的分数
+    filtered_matches_dict = {}
+    filtered_scores_dict = {}
+    
+    # 添加可信匹配对集合
+    trusted_pairs = set()
+
+    for key_pair, matches in matches_dict.items():
+        if len(matches) > 0:
+            filtered_matches_dict[key_pair] = matches[0]
+            filtered_scores_dict[key_pair] = matches[1]
+            # 记录初始匹配数
+            stats["初始"][key_pair] = len(matches[0])
+
+    stats = defaultdict(dict)
+    for key_pair, matches in filtered_matches_dict.items():
+        if len(matches) > 0:
+            # 记录初始匹配数
+            stats["初始"][key_pair] = len(matches[0])
+    
+
+    # return filtered_matches_dict, None
+    # 构建图像之间的连接图
+    G = nx.Graph()
+    match_stats = defaultdict(int)
+    
+    # 1. 创建图结构并统计初始匹配情况
+    for key_pair, matches in filtered_matches_dict.items():
+        key1, key2 = key_pair.split('-')
+        if len(matches) > 0:
+            G.add_edge(key1, key2, weight=len(matches))
+            match_stats[(key1, key2)] = len(matches)
+    
+    # 2. 使用循环一致性直接过滤不一致的匹配，并去除邻近点
+    # 为每个匹配对创建一个掩码，初始所有点都保留
+    match_masks = {}
+    for key_pair in filtered_matches_dict:
+        match_masks[key_pair] = np.ones(len(filtered_matches_dict[key_pair]), dtype=bool)
+    
+    cycle_filtered_count = 0
+    cycle_total_checked = 0
+    proximity_filtered_count = 0  # 新增：统计因邻近过滤移除的匹配数
+    
+    # 创建用于记录循环误差的数据结构
+    cycle_error_data = []
+    
+    # 查找所有长度为3的循环
+    for cycle in nx.cycle_basis(G):
+        if len(cycle) == 3:
+            # 获取三对匹配关系
+            keys = cycle
+            pairs = [
+                (keys[0], keys[1]),
+                (keys[1], keys[2]),
+                (keys[2], keys[0])
+            ]
+            
+            # 三元组名称
+            cycle_name = f"{keys[0]}-{keys[1]}-{keys[2]}"
+            
+            # 检查所有匹配对是否存在
+            valid_cycle = True
+            for key1, key2 in pairs:
+                pair_key = f"{key1}-{key2}"
+                reverse_key = f"{key2}-{key1}"
+                if pair_key not in filtered_matches_dict and reverse_key not in filtered_matches_dict:
+                    valid_cycle = False
+                    break
+            
+            if not valid_cycle:
+                continue
+            
+            # 构建匹配索引查找表
+            match_maps = []
+            pair_keys = []
+            is_reverse_lst = []
+            
+            # 记录每对之间的匹配数量
+            pair_match_counts = []
+            
+            for key1, key2 in pairs:
+                pair_key = f"{key1}-{key2}"
+                reverse_key = f"{key2}-{key1}"
+                
+                if pair_key in filtered_matches_dict:
+                    matches = filtered_matches_dict[pair_key]
+                    is_reverse = False
+                    pair_keys.append(pair_key)
+                else:
+                    matches = filtered_matches_dict[reverse_key]
+                    is_reverse = True
+                    pair_keys.append(reverse_key)
+                
+                is_reverse_lst.append(is_reverse)
+                pair_match_counts.append(len(matches))
+                
+                # 创建从idx1到idx2的映射以及索引映射（用于掩码）
+                if is_reverse:
+                    match_map = {int(m[1]): int(m[0]) for m in matches}
+                else:
+                    match_map = {int(m[0]): int(m[1]) for m in matches}
+                
+                match_maps.append(match_map)
+            
+            # 为每个匹配对准备检查记录
+            checked_indices = [set(), set(), set()]
+            consistent_indices = [set(), set(), set()]
+            inconsistent_points = [defaultdict(list), defaultdict(list), defaultdict(list)]  # 存储不一致点的坐标
+            
+            # === Step 1: 批量读取第一对匹配 ===
+            matches0 = np.array(filtered_matches_dict[pair_keys[0]], dtype=int)  # shape: (N, 2)
+            if is_reverse_lst[0]:
+                idx1_arr = matches0[:, 1]
+                idx2_arr = matches0[:, 0]
+            else:
+                idx1_arr = matches0[:, 0]
+                idx2_arr = matches0[:, 1]
+
+            # === Step 2: 映射 idx2 -> idx3 和 idx3 -> idx1_cycle ===
+            idx3_arr = np.array([match_maps[1].get(idx2, -1) for idx2 in idx2_arr])
+            valid_1 = idx3_arr != -1
+
+            idx1_cycle_arr = np.array([match_maps[2].get(idx3, -1) if valid else -1
+                                    for idx3, valid in zip(idx3_arr, valid_1)])
+            valid_2 = idx1_cycle_arr != -1
+
+            valid = valid_1 & valid_2
+            valid_idx = np.nonzero(valid)[0]
+
+            # === Step 3: 加载关键点坐标 ===
+            kp1 = np.array(features_data[keys[0]]['kp'])  # 第1张图像的关键点坐标
+            pt1 = kp1[idx1_arr[valid]]
+            pt1_cycle = kp1[idx1_cycle_arr[valid]]
+
+            # === Step 4: 距离检查（是否一致）并记录循环误差 ===
+            same_index = idx1_arr[valid] == idx1_cycle_arr[valid]
+            distances = np.linalg.norm(pt1 - pt1_cycle, axis=1)
+            close_enough = distances < 5
+            is_consistent = same_index | close_enough
+            
+            # 计算循环误差均值
+            if len(distances) > 0:
+                mean_cycle_error = np.mean(distances)
+                #another_et_another_et005.png-another_et_another_et004.png-another_et_another_et001.png
+                # 如果循环误差过大，移除该三元组中匹配数量最少的匹配对
+
+                # # # 在filter_matches_graph函数中添加调用
+                # # # 在处理循环时添加：
+                # if 'another_et_another_et008.png-another_et_another_et001.png-another_et_another_et009.png' in cycle_name:
+                #     # visualize_cycle_consistency(cycle_name, frames, filtered_matches_dict, features_data, 
+                #     #                         output_dir='cycle_visualization')
+                    
+                #     # 添加轨迹可视化
+                #     visualize_cycle_consistency_with_tracks(cycle_name, frames, filtered_matches_dict, 
+                #                                         features_data, output_dir='cycle_visualization')
+    
+                # 如果循环误差较小（良好的循环），将参与的匹配对标记为可信
+                if mean_cycle_error <= 5.0:  # 可以调整这个阈值
+                    for pair_key in pair_keys:
+                        trusted_pairs.add(pair_key)
+                    if verbose:
+                        print(f"三元组 {cycle_name} 循环误差较小 ({mean_cycle_error:.2f} <= 5.0)，标记匹配对为可信: {pair_keys}")
+
+                # 如果循环误差过大，考虑移除匹配对，但优先保护可信匹配对
+                if mean_cycle_error > 25:
+                    # 找出三对匹配中的可信匹配对和非可信匹配对
+                    trusted_pairs_in_cycle = []
+                    untrusted_pairs_in_cycle = []
+                    
+                    for i, pair_key in enumerate(pair_keys):
+                        # 检查正向和反向匹配是否都在可信集合中
+                        key1, key2 = pair_key.split('-')
+                        reverse_pair_key = f"{key2}-{key1}"
+                        
+                        # 如果正向或反向匹配在可信集合中，则认为该匹配对是可信的
+                        if pair_key in trusted_pairs or reverse_pair_key in trusted_pairs:
+                            trusted_pairs_in_cycle.append((i, pair_key, pair_match_counts[i]))
+                        else:
+                            untrusted_pairs_in_cycle.append((i, pair_key, pair_match_counts[i]))
+                    
+                    pair_to_remove = None
+                    
+                    if len(untrusted_pairs_in_cycle) > 0:
+                        # 如果有非可信匹配对，从中选择匹配数量最少的移除
+                        min_match_count = min(pair[2] for pair in untrusted_pairs_in_cycle)
+                        for i, pair_key, count in untrusted_pairs_in_cycle:
+                            if count == min_match_count:
+                                pair_to_remove = pair_key
+                                break
+                        
+                        if verbose:
+                            print(f"三元组 {cycle_name} 循环误差过大 ({mean_cycle_error:.2f} > 25)，从非可信匹配对中移除最弱匹配对 {pair_to_remove} (匹配数: {min_match_count})")
+                            if len(trusted_pairs_in_cycle) > 0:
+                                print(f"  保护的可信匹配对: {[pair[1] for pair in trusted_pairs_in_cycle]}")
+                    
+                    elif len(trusted_pairs_in_cycle) == 3:
+                        # 如果三对匹配都是可信的，放弃过滤
+                        if verbose:
+                            print(f"三元组 {cycle_name} 循环误差过大 ({mean_cycle_error:.2f} > 25)，但所有匹配对均为可信，放弃过滤")
+                        pair_to_remove = None
+                    
+                    else:
+                        # 这种情况不应该发生，但为了安全起见
+                        if verbose:
+                            print(f"三元组 {cycle_name} 出现异常情况，跳过过滤")
+                        pair_to_remove = None
+                    
+                    # 执行移除操作
+                    if pair_to_remove is not None:
+                        # 将该匹配对从 filtered_matches_dict 中移除
+                        if pair_to_remove in filtered_matches_dict:
+                            del filtered_matches_dict[pair_to_remove]
+                            
+                            # 更新统计信息
+                            stats["循环误差过滤"][pair_to_remove] = 0
+                            
+                            # 更新图结构，移除边
+                            key1, key2 = pair_to_remove.split('-')
+                            if G.has_edge(key1, key2):
+                                G.remove_edge(key1, key2)
+                                
+                            # 由于已经移除了匹配对，这个三元组不需要进行后续的一致性检查
+                            # 直接跳过当前循环的后续步骤
+                            continue
+                
+                                # 记录循环误差数据
+                
+                cycle_error_data.append({
+                    'cycle': cycle_name,
+                    'mean_error': mean_cycle_error,
+                    'matches_1': pair_match_counts[0],
+                    'matches_2': pair_match_counts[1],
+                    'matches_3': pair_match_counts[2],
+                    'checked_points': len(distances),
+                    'consistent_points': np.sum(is_consistent)
+                })
+            consistent_valid_idx = valid_idx[is_consistent]
+            inconsistent_valid_idx = valid_idx[~is_consistent]
+
+            # === Step 5: 为第二对和第三对构建查找表 ===
+            match_dict_1 = {(int(m1), int(m2)): i for i, (m1, m2) in enumerate(filtered_matches_dict[pair_keys[1]])}
+            match_dict_2 = {(int(m1), int(m2)): i for i, (m1, m2) in enumerate(filtered_matches_dict[pair_keys[2]])}
+
+            # === Step 6: 处理一致匹配 ===
+            for i in consistent_valid_idx:
+                idx1 = idx1_arr[i]
+                idx2 = idx2_arr[i]
+                idx3 = idx3_arr[i]
+                idx1_cycle = idx1_cycle_arr[i]
+
+                checked_indices[0].add(i)
+                consistent_indices[0].add(i)
+
+                idx_2 = match_dict_1.get((idx2, idx3))
+                if idx_2 is not None:
+                    checked_indices[1].add(idx_2)
+                    consistent_indices[1].add(idx_2)
+
+                idx_3 = match_dict_2.get((idx3, idx1_cycle))
+                if idx_3 is not None:
+                    checked_indices[2].add(idx_3)
+                    consistent_indices[2].add(idx_3)
+
+            # === Step 7: 处理不一致匹配 ===
+            kp2 = np.array(features_data[keys[1]]['kp'])
+            kp3 = np.array(features_data[keys[2]]['kp'])
+
+            for i in inconsistent_valid_idx:
+                idx1 = idx1_arr[i]
+                idx2 = idx2_arr[i]
+                idx3 = idx3_arr[i]
+
+                checked_indices[0].add(i)
+                
+                # 添加对应的坐标
+                inconsistent_points[0][pair_keys[0]].append(kp1[idx1])
+                inconsistent_points[1][pair_keys[1]].append(kp2[idx2])
+                inconsistent_points[2][pair_keys[2]].append(kp3[idx3])
+            
+            # 更新掩码 - 只将不一致的匹配设为False
+            for i in range(3):
+                for idx in checked_indices[i]:
+                    if idx not in consistent_indices[i]:
+                        match_masks[pair_keys[i]][idx] = False
+            
+            # 统计信息
+            for i in range(3):
+                cycle_total_checked += len(checked_indices[i])
+                cycle_filtered_count += len(checked_indices[i]) - len(consistent_indices[i])
+                
+                if verbose and checked_indices[i]:
+                    consist_ratio = len(consistent_indices[i]) / len(checked_indices[i]) * 100
+                    print(f"{pair_keys[i]}: 循环检查了 {len(checked_indices[i])} 个匹配, 一致: {len(consistent_indices[i])} ({consist_ratio:.1f}%)")
+            
+            # 3. 移除靠近不一致匹配的点对
+            if distance_threshold > 0:
+                for i, pair_key in enumerate(pair_keys):
+                    if pair_key in inconsistent_points[i] and len(inconsistent_points[i][pair_key]) > 0:
+                        key1, key2 = pair_key.split('-')
+                        matches = filtered_matches_dict[pair_key]
+                        kp1 = features_data[key1]['kp']
+                        kp2 = features_data[key2]['kp']
+                        matched_pts1 = kp1[matches[:, 0]]
+                        matched_pts2 = kp2[matches[:, 1]]
+                        
+                        inconsistent_pts = np.array(inconsistent_points[i][pair_key])
+                        
+                        # 计算所有匹配点与所有不一致点的距离（向量化）
+                        distances1 = np.linalg.norm(matched_pts1[:, np.newaxis] - inconsistent_pts[np.newaxis, :], axis=2)
+                        distances2 = np.linalg.norm(matched_pts2[:, np.newaxis] - inconsistent_pts[np.newaxis, :], axis=2)
+                        
+                        # 找到距离小于阈值的匹配点（在任一图像中）
+                        proximity_mask = np.any(distances1 < distance_threshold, axis=1) | np.any(distances2 < distance_threshold, axis=1)
+                        
+                        # 更新掩码：仅保留未标记为不一致且不在邻近范围的匹配
+                        original_mask = match_masks[pair_key].copy()
+                        match_masks[pair_key] = match_masks[pair_key] & ~proximity_mask
+                        
+                        # 统计因邻近过滤移除的匹配数
+                        removed_count = np.sum(original_mask & proximity_mask)
+                        proximity_filtered_count += removed_count
+                        
+                        if verbose and removed_count > 0:
+                            print(f"{pair_key}: 邻近过滤移除 {removed_count} 对匹配")
+    
+    # 将循环误差数据保存到CSV文件
+    if output_csv and cycle_error_data:
+        # 创建目录（如果不存在）
+        output_dir = os.path.dirname(output_csv)
+        if output_dir and not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+            
+        # 将数据转换为DataFrame并保存为CSV
+        df = pd.DataFrame(cycle_error_data)
+        df.to_csv(output_csv, index=False)
+        
+        if verbose:
+            print(f"循环误差统计已保存至: {output_csv}")
+            
+        # 打印一些汇总统计
+        if verbose:
+            print("\n循环误差统计摘要:")
+            print(f"总三元组数量: {len(df)}")
+            print(f"平均循环误差: {df['mean_error'].mean():.2f} 像素")
+            print(f"最大循环误差: {df['mean_error'].max():.2f} 像素")
+            print(f"最小循环误差: {df['mean_error'].min():.2f} 像素")
+    
+    # 应用循环一致性和邻近过滤掩码
+    for key_pair in list(filtered_matches_dict.keys()):  # 使用list()创建副本，避免在迭代时修改字典
+        if key_pair in match_masks:
+            original_count = len(filtered_matches_dict[key_pair])
+            filtered_matches_dict[key_pair] = filtered_matches_dict[key_pair][match_masks[key_pair]]
+            filtered_count = original_count - len(filtered_matches_dict[key_pair])
+            
+            # 如果过滤后匹配对数量小于15，则删除该匹配对
+            if len(filtered_matches_dict[key_pair]) < 15:
+                if verbose:
+                    print(f"{key_pair}: 过滤后剩余 {len(filtered_matches_dict[key_pair])} 对匹配 < 15，删除该匹配对")
+                del filtered_matches_dict[key_pair]
+                # 在统计中记录为0
+                stats["循环一致性检查后"][key_pair] = 0
+            else:
+                # 记录过滤后的状态
+                stats["循环一致性检查后"][key_pair] = len(filtered_matches_dict[key_pair])
+                
+                if verbose and filtered_count > 0:
+                    trusted_mark = " (可信)" if key_pair in trusted_pairs else ""
+                    print(f"{key_pair}{trusted_mark}: 循环一致性及邻近过滤移除 {filtered_count} 对匹配 ({filtered_count/original_count*100:.1f}%)，剩余 {len(filtered_matches_dict[key_pair])} 对")
+        else:
+            # 没有经过循环一致性检查的匹配对，检查数量是否足够
+            if len(filtered_matches_dict[key_pair]) < 15:
+                if verbose:
+                    print(f"{key_pair}: 匹配数量 {len(filtered_matches_dict[key_pair])} < 15，删除该匹配对")
+                del filtered_matches_dict[key_pair]
+                stats["循环一致性检查后"][key_pair] = 0
+            else:
+                stats["循环一致性检查后"][key_pair] = len(filtered_matches_dict[key_pair])
+
+    if cycle_total_checked > 0:
+        print(f"循环一致性总计检查: {cycle_total_checked} 对匹配, 过滤: {cycle_filtered_count} 对 ({cycle_filtered_count/cycle_total_checked*100:.1f}%)")
+    if proximity_filtered_count > 0:
+        print(f"邻近过滤总计移除: {proximity_filtered_count} 对匹配")
+    
+    # 保存循环一致性和邻近过滤后的状态
+    for key_pair in filtered_matches_dict:
+        stats["循环一致性检查后"][key_pair] = len(filtered_matches_dict[key_pair])
+    
+    # 4. 移除匹配点集中在直线附近的匹配对
+    if 0:
+        line_removed_pairs = 0
+        for key_pair in list(filtered_matches_dict.keys()):
+            if len(filtered_matches_dict[key_pair]) < 5:  # 匹配点太少无法可靠拟合直线
+                continue
+            
+            key1, key2 = key_pair.split('-')
+            matches = filtered_matches_dict[key_pair]
+            kp1 = features_data[key1]['kp']
+            kp2 = features_data[key2]['kp']
+            matched_pts1 = kp1[matches[:, 0]]  # 形状: (M, 2)
+            matched_pts2 = kp2[matches[:, 1]]  # 形状: (M, 2)
+            
+            # 使用RANSAC拟合直线，检查两张图像的点分布
+            for pts, img_name in [(matched_pts1, key1), (matched_pts2, key2)]:
+                try:
+                    # 将点转换为float32以兼容cv2.fitLine
+                    pts = pts.astype(np.float32)
+                    pts = pts.reshape(-1, 1, 2)  # 转换为 (N, 1, 2) 格式
+                    # 使用RANSAC拟合直线
+                    # distType=cv2.DIST_L2表示使用最小二乘法，param=0表示自动选择
+                    # reps=0.01表示点到直线的距离阈值，aeps=0.01表示角度阈值
+                    # 使用 cv2.fitLine 拟合直线
+                    vx, vy, x0, y0 = cv2.fitLine(pts, cv2.DIST_L2, 0, 0.01, 0.01)
+
+                    # 假设 pts 是 (N, 1, 2) 的点集，vx, vy, x0, y0 是拟合直线的参数
+                    # 提取点坐标
+                    pts_array = pts[:, 0, :]  # 形状 (N, 2)，即 [px, py]
+
+                    # 计算点到直线上某点的向量 (dx, dy)
+                    deltas = pts_array - np.array([x0, y0])[None,:,0]  # 形状 (N, 2)
+
+                    # 计算点到直线的距离（叉积的模）
+                    distances = np.abs(deltas[:, 0] * vy - deltas[:, 1] * vx)  # 形状 (N,)
+
+                    # 统计距离小于 10 像素的点数量
+                    threshold = 10.0  # 距离阈值（像素）
+                    inliers = sum(1 for dist in distances if dist < threshold)
+
+                    
+                    # 计算内点比例
+                    if len(pts) > 0:
+                        inlier_ratio = np.sum(inliers) / len(pts)
+                    else:
+                        inlier_ratio = 0.0
+                    
+                    if verbose:
+                        print(f"{key_pair} 在图像 {img_name} 的内点比例: {inlier_ratio:.2f}")
+                    
+                    # 如果内点比例超过阈值，移除整个匹配对
+                    if inlier_ratio > inlier_ratio_threshold:
+                        if verbose:
+                            print(f"{key_pair}: 在图像 {img_name} 的匹配点过于集中在直线附近 (内点比例 {inlier_ratio:.2f} > {inlier_ratio_threshold})，移除整个匹配对")
+                        del filtered_matches_dict[key_pair]
+                        line_removed_pairs += 1
+                        stats["直线过滤后"][key_pair] = 0
+                        break  # 任一图像的点集中在直线即可移除，无需检查另一张图像
+                    
+                except Exception as e:
+                    if verbose:
+                        print(f"{key_pair}: 直线拟合出错 (图像 {img_name}) - {e}")
+                    continue
+        
+        if verbose and line_removed_pairs > 0:
+            print(f"直线过滤总计移除: {line_removed_pairs} 个匹配对")
+        
+        # 保存直线过滤后的状态
+        for key_pair in filtered_matches_dict:
+            stats["直线过滤后"][key_pair] = len(filtered_matches_dict[key_pair])
+        
+
+    # 后续代码保持不变...
+    # 1. 限制每对图像的最大匹配点数量
+    # limited_count = 0
+    # for key_pair in list(filtered_matches_dict.keys()):
+    #     matches = filtered_matches_dict[key_pair]
+    #     if len(matches) > 2000:
+    #         # 排序后只保留最好的max_matches个匹配（假设匹配已按质量排序）
+    #         filtered_matches_dict[key_pair] = matches[:2000]
+    #         limited_count += 1
+            
+    #         if verbose:
+    #             print(f"{key_pair}: 限制匹配数量从 {len(matches)} 到 {2000}")
+
+    # 保存最终状态
+    for key_pair in list(filtered_matches_dict.keys()):
+        stats["最终"][key_pair] = len(filtered_matches_dict[key_pair])
+    
+    # 对已删除的匹配对，在最终状态中标记为0
+    for key_pair in matches_dict:
+        if key_pair not in filtered_matches_dict:
+            stats["最终"][key_pair] = 0
+
+    # 保存循环误差过滤状态的初始化
+    for key_pair in filtered_matches_dict:
+        stats["循环误差过滤"][key_pair] = len(filtered_matches_dict[key_pair])
+        
+    if verbose:
+        print(f"\n匹配过滤统计摘要:")
+        print(f"共处理 {len(matches_dict)} 对匹配")
+        print(f"保留匹配: {len(filtered_matches_dict)} 对\n")
+        
+        # 打印每个阶段的匹配数量变化
+        print(f"各阶段匹配数量变化:")
+        all_pairs = set()
+        for stage in stats:
+            all_pairs.update(stats[stage].keys())
+        
+        stages = list(stats.keys())
+        header = "匹配对        "
+        for stage in stages:
+            header += f" | {stage}"
+        print(header)
+        print("-" * len(header))
+        
+        sorted_pairs = sorted(all_pairs, key=lambda x: stats["初始"].get(x, 0), reverse=True)
+        
+        for pair in sorted_pairs:
+            line = f"{pair:12}"
+            for stage in stages:
+                value = stats[stage].get(pair, "-")
+                line += f" | {value:6}"
+            print(line)
+    
+    return filtered_matches_dict, cycle_error_data
+
+def filter_matches_graph_v3(frames, matches_dict, features_data_t, threshold=0.6, distance_threshold=10.0, inlier_ratio_threshold=0.8, verbose=True, output_csv=None):
+    """
+    基于图结构的匹配过滤函数，去除不一致的匹配及靠近不一致匹配的点对。
+    
+    Args:
+        frames: 图像路径列表
+        matches_dict: 匹配字典 {key1-key2: matches} idxs:matches[0] match_scores:matches[1]
+        features_data: 特征数据字典
+        threshold: 循环一致性过滤阈值
+        distance_threshold: 空间邻近过滤的距离阈值（像素）
+        verbose: 是否输出详细统计信息
+        output_csv: 保存循环误差统计的CSV文件路径
+        
+    Returns:
+        filtered_matches_dict: 过滤后的匹配字典
+    """
+    import numpy as np
+    import pandas as pd
+    import os
+    import csv
+    import copy
+    from collections import defaultdict
+    import networkx as nx
+
+    features_data_t = copy.deepcopy(features_data_t)
+    features_data = {k: {"kp":v['kp'].cpu().numpy(),"desc":v['desc'].cpu().numpy()} for k, v in features_data_t.items()}
+    
+    # 记录每个阶段的匹配数量
+    stats = defaultdict(dict)
+        
+    # 新字典去除matches_dict中的分数
+    filtered_matches_dict = {}
+    filtered_scores_dict = {}
+    
+    # 添加可信匹配对集合
+    trusted_pairs = set()
+
+    for key_pair, matches in matches_dict.items():
+        if len(matches) > 0:
+            filtered_matches_dict[key_pair] = matches[0]
+            filtered_scores_dict[key_pair] = matches[1]
+            # 记录初始匹配数
+            stats["初始"][key_pair] = len(matches[0])
+
+    stats = defaultdict(dict)
+    for key_pair, matches in filtered_matches_dict.items():
+        if len(matches) > 0:
+            # 记录初始匹配数
+            stats["初始"][key_pair] = len(matches[0])
+    
+
+    # return filtered_matches_dict, None
+    # 构建图像之间的连接图
+    G = nx.Graph()
+    match_stats = defaultdict(int)
+    
+    # 1. 创建图结构并统计初始匹配情况
+    for key_pair, matches in filtered_matches_dict.items():
+        key1, key2 = key_pair.split('-')
+        if len(matches) > 0:
+            G.add_edge(key1, key2, weight=len(matches))
+            match_stats[(key1, key2)] = len(matches)
+    
+    # 2. 使用循环一致性直接过滤不一致的匹配，并去除邻近点
+    # 为每个匹配对创建一个掩码，初始所有点都保留
+    match_masks = {}
+    for key_pair in filtered_matches_dict:
+        match_masks[key_pair] = np.ones(len(filtered_matches_dict[key_pair]), dtype=bool)
+    
+    cycle_filtered_count = 0
+    cycle_total_checked = 0
+    proximity_filtered_count = 0  # 新增：统计因邻近过滤移除的匹配数
+    
+    # 创建用于记录循环误差的数据结构
+    cycle_error_data = []
+    
+    # 查找所有长度为3的循环
+    problematic_pairs = set()  # 记录循环误差大的匹配对
+    for cycle in nx.cycle_basis(G):
+        if len(cycle) == 3:
+            # 获取三对匹配关系
+            keys = cycle
+            pairs = [
+                (keys[0], keys[1]),
+                (keys[1], keys[2]),
+                (keys[2], keys[0])
+            ]
+            
+            # 三元组名称
+            cycle_name = f"{keys[0]}-{keys[1]}-{keys[2]}"
+            
+            # 检查所有匹配对是否存在
+            valid_cycle = True
+            for key1, key2 in pairs:
+                pair_key = f"{key1}-{key2}"
+                reverse_key = f"{key2}-{key1}"
+                if pair_key not in filtered_matches_dict and reverse_key not in filtered_matches_dict:
+                    valid_cycle = False
+                    break
+            
+            if not valid_cycle:
+                continue
+            
+            # 构建匹配索引查找表
+            match_maps = []
+            pair_keys = []
+            is_reverse_lst = []
+            
+            # 记录每对之间的匹配数量
+            pair_match_counts = []
+            
+            for key1, key2 in pairs:
+                pair_key = f"{key1}-{key2}"
+                reverse_key = f"{key2}-{key1}"
+                
+                if pair_key in filtered_matches_dict:
+                    matches = filtered_matches_dict[pair_key]
+                    is_reverse = False
+                    pair_keys.append(pair_key)
+                else:
+                    matches = filtered_matches_dict[reverse_key]
+                    is_reverse = True
+                    pair_keys.append(reverse_key)
+                
+                is_reverse_lst.append(is_reverse)
+                pair_match_counts.append(len(matches))
+                
+                # 创建从idx1到idx2的映射以及索引映射（用于掩码）
+                if is_reverse:
+                    match_map = {int(m[1]): int(m[0]) for m in matches}
+                else:
+                    match_map = {int(m[0]): int(m[1]) for m in matches}
+                
+                match_maps.append(match_map)
+            
+            # 为每个匹配对准备检查记录
+            checked_indices = [set(), set(), set()]
+            consistent_indices = [set(), set(), set()]
+            inconsistent_points = [defaultdict(list), defaultdict(list), defaultdict(list)]  # 存储不一致点的坐标
+            
+            # === Step 1: 批量读取第一对匹配 ===
+            matches0 = np.array(filtered_matches_dict[pair_keys[0]], dtype=int)  # shape: (N, 2)
+            if is_reverse_lst[0]:
+                idx1_arr = matches0[:, 1]
+                idx2_arr = matches0[:, 0]
+            else:
+                idx1_arr = matches0[:, 0]
+                idx2_arr = matches0[:, 1]
+
+            # === Step 2: 映射 idx2 -> idx3 和 idx3 -> idx1_cycle ===
+            idx3_arr = np.array([match_maps[1].get(idx2, -1) for idx2 in idx2_arr])
+            valid_1 = idx3_arr != -1
+
+            idx1_cycle_arr = np.array([match_maps[2].get(idx3, -1) if valid else -1
+                                    for idx3, valid in zip(idx3_arr, valid_1)])
+            valid_2 = idx1_cycle_arr != -1
+
+            valid = valid_1 & valid_2
+            valid_idx = np.nonzero(valid)[0]
+
+            # === Step 3: 加载关键点坐标 ===
+            kp1 = np.array(features_data[keys[0]]['kp'])  # 第1张图像的关键点坐标
+            pt1 = kp1[idx1_arr[valid]]
+            pt1_cycle = kp1[idx1_cycle_arr[valid]]
+
+            # === Step 4: 距离检查（是否一致）并记录循环误差 ===
+            same_index = idx1_arr[valid] == idx1_cycle_arr[valid]
+            distances = np.linalg.norm(pt1 - pt1_cycle, axis=1)
+            close_enough = distances < 5
+            is_consistent = same_index | close_enough
+            
+            # 计算循环误差均值
+            if len(distances) > 0:
+                mean_cycle_error = np.mean(distances)
+                #another_et_another_et005.png-another_et_another_et004.png-another_et_another_et001.png
+                # 如果循环误差过大，移除该三元组中匹配数量最少的匹配对
+
+                # # # 在filter_matches_graph函数中添加调用
+                # # # 在处理循环时添加：
+                # if 'another_et_another_et008.png-another_et_another_et001.png-another_et_another_et009.png' in cycle_name:
+                #     # visualize_cycle_consistency(cycle_name, frames, filtered_matches_dict, features_data, 
+                #     #                         output_dir='cycle_visualization')
+                    
+                #     # 添加轨迹可视化
+                #     visualize_cycle_consistency_with_tracks(cycle_name, frames, filtered_matches_dict, 
+                #                                         features_data, output_dir='cycle_visualization')
+    
+                # 如果循环误差较小（良好的循环），将参与的匹配对标记为可信
+                if mean_cycle_error <= 5.0:  # 可以调整这个阈值
+                    for pair_key in pair_keys:
+                        trusted_pairs.add(pair_key)
+                    if verbose:
+                        print(f"三元组 {cycle_name} 循环误差较小 ({mean_cycle_error:.2f} <= 5.0)，标记匹配对为可信: {pair_keys}")
+
+            # 如果循环误差过大，记录问题匹配对（但不立即移除）
+            if mean_cycle_error > 25:
+                for pair_key in pair_keys:
+                    problematic_pairs.add(pair_key)
+                if verbose:
+                    print(f"三元组 {cycle_name} 循环误差过大 ({mean_cycle_error:.2f} > 25)，记录问题匹配对: {pair_keys}")
+            
+            # 记录循环误差数据
+            cycle_error_data.append({
+                'cycle': cycle_name,
+                'mean_error': mean_cycle_error,
+                'matches_1': pair_match_counts[0],
+                'matches_2': pair_match_counts[1],
+                'matches_3': pair_match_counts[2],
+                'checked_points': len(distances),
+                'consistent_points': np.sum(is_consistent)
+            })
+            
+        consistent_valid_idx = valid_idx[is_consistent]
+        inconsistent_valid_idx = valid_idx[~is_consistent]
+
+        # === Step 5: 为第二对和第三对构建查找表 ===
+        match_dict_1 = {(int(m1), int(m2)): i for i, (m1, m2) in enumerate(filtered_matches_dict[pair_keys[1]])}
+        match_dict_2 = {(int(m1), int(m2)): i for i, (m1, m2) in enumerate(filtered_matches_dict[pair_keys[2]])}
+
+        # === Step 6: 处理一致匹配 ===
+        for i in consistent_valid_idx:
+            idx1 = idx1_arr[i]
+            idx2 = idx2_arr[i]
+            idx3 = idx3_arr[i]
+            idx1_cycle = idx1_cycle_arr[i]
+
+            checked_indices[0].add(i)
+            consistent_indices[0].add(i)
+
+            idx_2 = match_dict_1.get((idx2, idx3))
+            if idx_2 is not None:
+                checked_indices[1].add(idx_2)
+                consistent_indices[1].add(idx_2)
+
+            idx_3 = match_dict_2.get((idx3, idx1_cycle))
+            if idx_3 is not None:
+                checked_indices[2].add(idx_3)
+                consistent_indices[2].add(idx_3)
+
+        # === Step 7: 处理不一致匹配 ===
+        kp2 = np.array(features_data[keys[1]]['kp'])
+        kp3 = np.array(features_data[keys[2]]['kp'])
+
+        for i in inconsistent_valid_idx:
+            idx1 = idx1_arr[i]
+            idx2 = idx2_arr[i]
+            idx3 = idx3_arr[i]
+
+            checked_indices[0].add(i)
+            
+            # 添加对应的坐标
+            inconsistent_points[0][pair_keys[0]].append(kp1[idx1])
+            inconsistent_points[1][pair_keys[1]].append(kp2[idx2])
+            inconsistent_points[2][pair_keys[2]].append(kp3[idx3])
+        
+        # 更新掩码 - 只将不一致的匹配设为False
+        for i in range(3):
+            for idx in checked_indices[i]:
+                if idx not in consistent_indices[i]:
+                    match_masks[pair_keys[i]][idx] = False
+        
+        # 统计信息
+        for i in range(3):
+            cycle_total_checked += len(checked_indices[i])
+            cycle_filtered_count += len(checked_indices[i]) - len(consistent_indices[i])
+            
+            if verbose and checked_indices[i]:
+                consist_ratio = len(consistent_indices[i]) / len(checked_indices[i]) * 100
+                print(f"{pair_keys[i]}: 循环检查了 {len(checked_indices[i])} 个匹配, 一致: {len(consistent_indices[i])} ({consist_ratio:.1f}%)")
+        
+        # 3. 移除靠近不一致匹配的点对
+        if distance_threshold > 0:
+            for i, pair_key in enumerate(pair_keys):
+                if pair_key in inconsistent_points[i] and len(inconsistent_points[i][pair_key]) > 0:
+                    key1, key2 = pair_key.split('-')
+                    matches = filtered_matches_dict[pair_key]
+                    kp1 = features_data[key1]['kp']
+                    kp2 = features_data[key2]['kp']
+                    matched_pts1 = kp1[matches[:, 0]]
+                    matched_pts2 = kp2[matches[:, 1]]
+                    
+                    inconsistent_pts = np.array(inconsistent_points[i][pair_key])
+                    
+                    # 计算所有匹配点与所有不一致点的距离（向量化）
+                    distances1 = np.linalg.norm(matched_pts1[:, np.newaxis] - inconsistent_pts[np.newaxis, :], axis=2)
+                    distances2 = np.linalg.norm(matched_pts2[:, np.newaxis] - inconsistent_pts[np.newaxis, :], axis=2)
+                    
+                    # 找到距离小于阈值的匹配点（在任一图像中）
+                    proximity_mask = np.any(distances1 < distance_threshold, axis=1) | np.any(distances2 < distance_threshold, axis=1)
+                    
+                    # 更新掩码：仅保留未标记为不一致且不在邻近范围的匹配
+                    original_mask = match_masks[pair_key].copy()
+                    match_masks[pair_key] = match_masks[pair_key] & ~proximity_mask
+                    
+                    # 统计因邻近过滤移除的匹配数
+                    removed_count = np.sum(original_mask & proximity_mask)
+                    proximity_filtered_count += removed_count
+                    
+                    if verbose and removed_count > 0:
+                        print(f"{pair_key}: 邻近过滤移除 {removed_count} 对匹配")
+    
+    # 将循环误差数据保存到CSV文件
+    if output_csv and cycle_error_data:
+        # 创建目录（如果不存在）
+        output_dir = os.path.dirname(output_csv)
+        if output_dir and not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+            
+        # 将数据转换为DataFrame并保存为CSV
+        df = pd.DataFrame(cycle_error_data)
+        df.to_csv(output_csv, index=False)
+        
+        if verbose:
+            print(f"循环误差统计已保存至: {output_csv}")
+            
+        # 打印一些汇总统计
+        if verbose:
+            print("\n循环误差统计摘要:")
+            print(f"总三元组数量: {len(df)}")
+            print(f"平均循环误差: {df['mean_error'].mean():.2f} 像素")
+            print(f"最大循环误差: {df['mean_error'].max():.2f} 像素")
+            print(f"最小循环误差: {df['mean_error'].min():.2f} 像素")
+    
+    # 应用循环一致性和邻近过滤掩码
+    for key_pair in list(filtered_matches_dict.keys()):  # 使用list()创建副本，避免在迭代时修改字典
+        if key_pair in match_masks:
+            original_count = len(filtered_matches_dict[key_pair])
+            filtered_matches_dict[key_pair] = filtered_matches_dict[key_pair][match_masks[key_pair]]
+            filtered_count = original_count - len(filtered_matches_dict[key_pair])
+            
+            # 如果过滤后匹配对数量小于15，则删除该匹配对
+            if len(filtered_matches_dict[key_pair]) < 15:
+                if verbose:
+                    print(f"{key_pair}: 过滤后剩余 {len(filtered_matches_dict[key_pair])} 对匹配 < 15，删除该匹配对")
+                del filtered_matches_dict[key_pair]
+                # 在统计中记录为0
+                stats["循环一致性检查后"][key_pair] = 0
+            else:
+                # 记录过滤后的状态
+                stats["循环一致性检查后"][key_pair] = len(filtered_matches_dict[key_pair])
+                
+                if verbose and filtered_count > 0:
+                    trusted_mark = " (可信)" if key_pair in trusted_pairs else ""
+                    print(f"{key_pair}{trusted_mark}: 循环一致性及邻近过滤移除 {filtered_count} 对匹配 ({filtered_count/original_count*100:.1f}%)，剩余 {len(filtered_matches_dict[key_pair])} 对")
+        else:
+            # 没有经过循环一致性检查的匹配对，检查数量是否足够
+            if len(filtered_matches_dict[key_pair]) < 15:
+                if verbose:
+                    print(f"{key_pair}: 匹配数量 {len(filtered_matches_dict[key_pair])} < 15，删除该匹配对")
+                del filtered_matches_dict[key_pair]
+                stats["循环一致性检查后"][key_pair] = 0
+            else:
+                stats["循环一致性检查后"][key_pair] = len(filtered_matches_dict[key_pair])
+
+    if cycle_total_checked > 0:
+        print(f"循环一致性总计检查: {cycle_total_checked} 对匹配, 过滤: {cycle_filtered_count} 对 ({cycle_filtered_count/cycle_total_checked*100:.1f}%)")
+    if proximity_filtered_count > 0:
+        print(f"邻近过滤总计移除: {proximity_filtered_count} 对匹配")
+    # === 新增：基于可信匹配对过滤循环误差大的匹配对 ===
+    removed_pairs_count = 0
+
+    if problematic_pairs:
+        if verbose:
+            print(f"\n开始根据可信匹配对过滤循环误差大的匹配对...")
+            print(f"可信匹配对数量: {len(trusted_pairs)}")
+            print(f"问题匹配对数量: {len(problematic_pairs)}")
+        
+        # 对每个问题三元组，移除其中匹配数量最少且非可信的匹配对
+        problematic_cycles = defaultdict(list)  # {cycle_name: [pair_keys]}
+        
+        # 重新分析问题匹配对，按循环分组
+        for cycle in nx.cycle_basis(G):
+            if len(cycle) == 3:
+                keys = cycle
+                pairs = [
+                    (keys[0], keys[1]),
+                    (keys[1], keys[2]),
+                    (keys[2], keys[0])
+                ]
+                cycle_name = f"{keys[0]}-{keys[1]}-{keys[2]}"
+                
+                # 检查该循环是否包含问题匹配对
+                cycle_pair_keys = []
+                has_problematic = False
+                
+                for key1, key2 in pairs:
+                    pair_key = f"{key1}-{key2}"
+                    reverse_key = f"{key2}-{key1}"
+                    
+                    if pair_key in filtered_matches_dict:
+                        cycle_pair_keys.append(pair_key)
+                        if pair_key in problematic_pairs:
+                            has_problematic = True
+                    elif reverse_key in filtered_matches_dict:
+                        cycle_pair_keys.append(reverse_key)
+                        if reverse_key in problematic_pairs:
+                            has_problematic = True
+                
+                if has_problematic and len(cycle_pair_keys) == 3:
+                    problematic_cycles[cycle_name] = cycle_pair_keys
+        
+        # 处理每个问题循环
+        for cycle_name, pair_keys in problematic_cycles.items():
+            # 找出三对匹配中的可信匹配对和非可信匹配对
+            trusted_pairs_in_cycle = []
+            untrusted_pairs_in_cycle = []
+            
+            for pair_key in pair_keys:
+                # 检查正向和反向匹配是否都在可信集合中
+                key1, key2 = pair_key.split('-')
+                reverse_pair_key = f"{key2}-{key1}"
+                
+                # 如果正向或反向匹配在可信集合中，则认为该匹配对是可信的
+                if pair_key in trusted_pairs or reverse_pair_key in trusted_pairs:
+                    match_count = len(filtered_matches_dict[pair_key]) if pair_key in filtered_matches_dict else 0
+                    trusted_pairs_in_cycle.append((pair_key, match_count))
+                else:
+                    match_count = len(filtered_matches_dict[pair_key]) if pair_key in filtered_matches_dict else 0
+                    untrusted_pairs_in_cycle.append((pair_key, match_count))
+            
+            pair_to_remove = None
+            
+            if len(untrusted_pairs_in_cycle) > 0:
+                # 如果有非可信匹配对，从中选择匹配数量最少的移除
+                min_match_count = min(pair[1] for pair in untrusted_pairs_in_cycle)
+                for pair_key, count in untrusted_pairs_in_cycle:
+                    if count == min_match_count:
+                        pair_to_remove = pair_key
+                        break
+                
+                if verbose:
+                    print(f"三元组 {cycle_name} 从非可信匹配对中移除最弱匹配对 {pair_to_remove} (匹配数: {min_match_count})")
+                    if len(trusted_pairs_in_cycle) > 0:
+                        print(f"  保护的可信匹配对: {[pair[0] for pair in trusted_pairs_in_cycle]}")
+            
+            elif len(trusted_pairs_in_cycle) == 3:
+                # 如果三对匹配都是可信的，放弃过滤
+                if verbose:
+                    print(f"三元组 {cycle_name} 所有匹配对均为可信，放弃过滤")
+                pair_to_remove = None
+            
+            else:
+                # 这种情况不应该发生，但为了安全起见
+                if verbose:
+                    print(f"三元组 {cycle_name} 出现异常情况，跳过过滤")
+                pair_to_remove = None
+            
+            # 执行移除操作
+            if pair_to_remove is not None and pair_to_remove in filtered_matches_dict:
+                del filtered_matches_dict[pair_to_remove]
+                removed_pairs_count += 1
+                
+                # 更新统计信息
+                stats["循环误差过滤"][pair_to_remove] = 0
+                
+                # 更新图结构，移除边
+                key1, key2 = pair_to_remove.split('-')
+                if G.has_edge(key1, key2):
+                    G.remove_edge(key1, key2)
+
+    if verbose and removed_pairs_count > 0:
+        print(f"循环误差过滤总计移除: {removed_pairs_count} 个匹配对")
+
+    # 保存循环一致性和邻近过滤后的状态
+    for key_pair in filtered_matches_dict:
+        stats["循环一致性检查后"][key_pair] = len(filtered_matches_dict[key_pair])
+
+
+    # 保存循环一致性和邻近过滤后的状态
+    for key_pair in filtered_matches_dict:
+        stats["循环一致性检查后"][key_pair] = len(filtered_matches_dict[key_pair])
+    
+    # 4. 移除匹配点集中在直线附近的匹配对
+    if 0:
+        line_removed_pairs = 0
+        for key_pair in list(filtered_matches_dict.keys()):
+            if len(filtered_matches_dict[key_pair]) < 5:  # 匹配点太少无法可靠拟合直线
+                continue
+            
+            key1, key2 = key_pair.split('-')
+            matches = filtered_matches_dict[key_pair]
+            kp1 = features_data[key1]['kp']
+            kp2 = features_data[key2]['kp']
+            matched_pts1 = kp1[matches[:, 0]]  # 形状: (M, 2)
+            matched_pts2 = kp2[matches[:, 1]]  # 形状: (M, 2)
+            
+            # 使用RANSAC拟合直线，检查两张图像的点分布
+            for pts, img_name in [(matched_pts1, key1), (matched_pts2, key2)]:
+                try:
+                    # 将点转换为float32以兼容cv2.fitLine
+                    pts = pts.astype(np.float32)
+                    pts = pts.reshape(-1, 1, 2)  # 转换为 (N, 1, 2) 格式
+                    # 使用RANSAC拟合直线
+                    # distType=cv2.DIST_L2表示使用最小二乘法，param=0表示自动选择
+                    # reps=0.01表示点到直线的距离阈值，aeps=0.01表示角度阈值
+                    # 使用 cv2.fitLine 拟合直线
+                    vx, vy, x0, y0 = cv2.fitLine(pts, cv2.DIST_L2, 0, 0.01, 0.01)
+
+                    # 假设 pts 是 (N, 1, 2) 的点集，vx, vy, x0, y0 是拟合直线的参数
+                    # 提取点坐标
+                    pts_array = pts[:, 0, :]  # 形状 (N, 2)，即 [px, py]
+
+                    # 计算点到直线上某点的向量 (dx, dy)
+                    deltas = pts_array - np.array([x0, y0])[None,:,0]  # 形状 (N, 2)
+
+                    # 计算点到直线的距离（叉积的模）
+                    distances = np.abs(deltas[:, 0] * vy - deltas[:, 1] * vx)  # 形状 (N,)
+
+                    # 统计距离小于 10 像素的点数量
+                    threshold = 10.0  # 距离阈值（像素）
+                    inliers = sum(1 for dist in distances if dist < threshold)
+
+                    
+                    # 计算内点比例
+                    if len(pts) > 0:
+                        inlier_ratio = np.sum(inliers) / len(pts)
+                    else:
+                        inlier_ratio = 0.0
+                    
+                    if verbose:
+                        print(f"{key_pair} 在图像 {img_name} 的内点比例: {inlier_ratio:.2f}")
+                    
+                    # 如果内点比例超过阈值，移除整个匹配对
+                    if inlier_ratio > inlier_ratio_threshold:
+                        if verbose:
+                            print(f"{key_pair}: 在图像 {img_name} 的匹配点过于集中在直线附近 (内点比例 {inlier_ratio:.2f} > {inlier_ratio_threshold})，移除整个匹配对")
+                        del filtered_matches_dict[key_pair]
+                        line_removed_pairs += 1
+                        stats["直线过滤后"][key_pair] = 0
+                        break  # 任一图像的点集中在直线即可移除，无需检查另一张图像
+                    
+                except Exception as e:
+                    if verbose:
+                        print(f"{key_pair}: 直线拟合出错 (图像 {img_name}) - {e}")
+                    continue
+        
+        if verbose and line_removed_pairs > 0:
+            print(f"直线过滤总计移除: {line_removed_pairs} 个匹配对")
+        
+        # 保存直线过滤后的状态
+        for key_pair in filtered_matches_dict:
+            stats["直线过滤后"][key_pair] = len(filtered_matches_dict[key_pair])
+        
+
+    # 后续代码保持不变...
+    # 1. 限制每对图像的最大匹配点数量
+    # limited_count = 0
+    # for key_pair in list(filtered_matches_dict.keys()):
+    #     matches = filtered_matches_dict[key_pair]
+    #     if len(matches) > 2000:
+    #         # 排序后只保留最好的max_matches个匹配（假设匹配已按质量排序）
+    #         filtered_matches_dict[key_pair] = matches[:2000]
+    #         limited_count += 1
+            
+    #         if verbose:
+    #             print(f"{key_pair}: 限制匹配数量从 {len(matches)} 到 {2000}")
+
+    # 保存最终状态
+    for key_pair in list(filtered_matches_dict.keys()):
+        stats["最终"][key_pair] = len(filtered_matches_dict[key_pair])
+    
+    # 对已删除的匹配对，在最终状态中标记为0
+    for key_pair in matches_dict:
+        if key_pair not in filtered_matches_dict:
+            stats["最终"][key_pair] = 0
+
+    # 保存循环误差过滤状态的初始化
+    for key_pair in filtered_matches_dict:
+        stats["循环误差过滤"][key_pair] = len(filtered_matches_dict[key_pair])
+        
+    if verbose:
+        print(f"\n匹配过滤统计摘要:")
+        print(f"共处理 {len(matches_dict)} 对匹配")
+        print(f"保留匹配: {len(filtered_matches_dict)} 对\n")
+        
+        # 打印每个阶段的匹配数量变化
+        print(f"各阶段匹配数量变化:")
+        all_pairs = set()
+        for stage in stats:
+            all_pairs.update(stats[stage].keys())
+        
+        stages = list(stats.keys())
+        header = "匹配对        "
+        for stage in stages:
+            header += f" | {stage}"
+        print(header)
+        print("-" * len(header))
+        
+        sorted_pairs = sorted(all_pairs, key=lambda x: stats["初始"].get(x, 0), reverse=True)
+        
+        for pair in sorted_pairs:
+            line = f"{pair:12}"
+            for stage in stages:
+                value = stats[stage].get(pair, "-")
+                line += f" | {value:6}"
+            print(line)
+    
+    return filtered_matches_dict, cycle_error_data
+
 def filter_matches_graph(frames, matches_dict, features_data_t, threshold=0.6, distance_threshold=10.0, inlier_ratio_threshold=0.8, verbose=True, output_csv=None):
     """
     基于图结构的匹配过滤函数，去除不一致的匹配及靠近不一致匹配的点对。
