@@ -2813,7 +2813,7 @@ def match_with_gimlightglue_ensemble(lightglue_matcher, img_fnames, index_pairs,
     return match_matrix
 
 def match_with_gimlightglue_ensemble_withfine(lightglue_matcher, img_fnames, index_pairs, feature_dir='.featureout', 
-                                           device=torch.device('cpu'), min_matches=25, batch_size=2, 
+                                           device=torch.device('cpu'), min_matches=20, batch_size=2, 
                                            tok_limit=1200, match_limit=4096, verbose=True, visualize=True):
     """
     使用批处理方式进行特征匹配，点数不会超过 max_points，但可能小于。
@@ -2990,9 +2990,9 @@ def match_with_gimlightglue_ensemble_withfine(lightglue_matcher, img_fnames, ind
 
                 pred = {
                     'keypoints0': kp1[:match_limit][None],
-                    'keypoints1': kp2[:match_limit][:3072][None],
+                    'keypoints1': kp2[:match_limit][None],
                     'descriptors0': desc1[:match_limit][None],
-                    'descriptors1': desc2[:match_limit][:3072][None],
+                    'descriptors1': desc2[:match_limit][None],
                     'size0': features_data[key1]['size'],
                     'size1': features_data[key2]['size'],
                     'scale0': features_data[key1]['scale'],
@@ -3093,11 +3093,11 @@ def match_with_gimlightglue_ensemble_withfine(lightglue_matcher, img_fnames, ind
             sorted_dists = []
             for i in range(len(batch_dists)):
                 if len(batch_dists[i]) > 0 or len(batch_dists_fine[i]) > 0:
-                    # dists = torch.cat([batch_dists[i],batch_dists_fine[i]])
-                    # idxs = torch.cat([batch_idxs[i],batch_idxs_fine[i]])
+                    dists = torch.cat([batch_dists[i],batch_dists_fine[i]])
+                    idxs = torch.cat([batch_idxs[i],batch_idxs_fine[i]])
 
-                    dists = batch_dists_fine[i]
-                    idxs = batch_idxs_fine[i]
+                    # dists = batch_dists[i]
+                    # idxs = batch_idxs[i]
                     dists, idxs = match_nms(dists, idxs, batch_info[i], features_data, 1)
                     sorted_indices = torch.argsort(dists, descending=True)
                     sorted_dists_one = dists[sorted_indices]
@@ -5545,6 +5545,192 @@ def import_into_colmap(img_dir, feature_dir='.featureout', database_path='colmap
     db.commit()
     return
 
+def compare_reconstruction_models(maps1, maps2, images):
+    """比较两个重建模型的质量，返回更优的模型"""
+    def evaluate_model(maps):
+        if not maps:
+            return 0, 0, 0, 0, 0
+        
+        total_registered = 0
+        total_clusters = len(maps)
+        avg_track_length = 0
+        total_3d_points = 0
+        avg_reprojection_error = 0
+        
+        for map_index, cur_map in maps.items():
+            total_registered += len(cur_map.images)
+            total_3d_points += len(cur_map.points3D)
+            
+            # 计算平均track长度
+            if hasattr(cur_map, 'points3D') and cur_map.points3D:
+                track_lengths = [len(point.track.elements) for point in cur_map.points3D.values()]
+                if track_lengths:
+                    avg_track_length += sum(track_lengths) / len(track_lengths)
+                
+                # 计算平均重投影误差
+                errors = [point.error for point in cur_map.points3D.values()]
+                if errors:
+                    avg_reprojection_error += sum(errors) / len(errors)
+        
+        if total_clusters > 0:
+            avg_track_length /= total_clusters
+            avg_reprojection_error /= total_clusters
+            
+        return total_registered, total_clusters, avg_track_length, total_3d_points, avg_reprojection_error
+    
+    reg1, clusters1, track_len1, points1, error1 = evaluate_model(maps1)
+    reg2, clusters2, track_len2, points2, error2 = evaluate_model(maps2)
+    
+    # 改进的评分策略
+    # 1. 注册图像数量权重最高
+    # 2. track长度很重要，但要防止异常值
+    # 3. 聚类数量考虑合理性（1-3个为正常范围）
+    # 4. 3D点数量反映重建密度
+    # 5. 重投影误差反映精度（越小越好）
+    
+    # 聚类数量惩罚（1-3个聚类为正常，超过3个给予惩罚）
+    cluster_penalty1 = max(0, clusters1 - 3) * 5
+    cluster_penalty2 = max(0, clusters2 - 3) * 5
+    
+    # track长度标准化（防止异常值影响）
+    normalized_track1 = min(track_len1, 10)  # 限制最大值为10
+    normalized_track2 = min(track_len2, 10)
+    
+    # 重投影误差标准化（误差越小越好）
+    error_score1 = max(0, 10 - error1) if error1 > 0 else 0
+    error_score2 = max(0, 10 - error2) if error2 > 0 else 0
+    
+    score1 = (reg1 * 2 +                    # 注册图像数量（最高权重）
+              normalized_track1 * 5 +         # 平均track长度
+              points1 * 0.01 +               # 3D点数量
+              error_score1 * 5 -             # 重投影误差（转为正向分数）
+              cluster_penalty1)              # 聚类数量惩罚
+              
+    score2 = (reg2 * 2 + 
+              normalized_track2 * 5 + 
+              points2 * 0.01 + 
+              error_score2 * 5 - 
+              cluster_penalty2)
+    
+    print(f"Model 1: {reg1} registered, {clusters1} clusters, track: {track_len1:.2f}, "
+          f"points: {points1}, error: {error1:.2f}, score: {score1:.2f}")
+    print(f"Model 2: {reg2} registered, {clusters2} clusters, track: {track_len2:.2f}, "
+          f"points: {points2}, error: {error2:.2f}, score: {score2:.2f}")
+    
+    return maps1 if score1 >= score2 else maps2
+
+def incremental_mapping_with_monitoring(database_path, image_path, output_path, mapper_options, images_num,
+                                       time_threshold=30.0, max_attempts=2):
+    """
+    带监控的增量建图，如果运行时间小于阈值则重新建图并比较结果
+    
+    Args:
+        database_path: COLMAP数据库路径
+        images_dir: 图像目录
+        output_path: 输出路径
+        mapper_options: 建图选项
+        time_threshold: 时间阈值（秒），小于此值则重新建图
+        max_attempts: 最大尝试次数
+    
+    Returns:
+        best_maps: 最优的建图结果
+        total_time: 总建图时间
+        num_attempts: 实际尝试次数
+    """
+    best_maps = None
+    total_time = 0
+    attempt = 1
+
+    images_dir = image_path
+    
+    print(f"开始第 {attempt} 次建图...")
+    
+    # 第一次建图
+    t_start = time()
+    os.makedirs(f"{output_path}_attempt_{attempt}", exist_ok=True)
+    
+    try:
+        maps = pycolmap.incremental_mapping(
+            database_path=database_path,
+            image_path=images_dir,
+            output_path=f"{output_path}_attempt_{attempt}",
+            options=mapper_options
+        )
+        first_time = time() - t_start
+        total_time += first_time
+        best_maps = maps
+        
+        print(f"第 {attempt} 次建图完成，耗时: {first_time:.2f}秒")
+        print(f"注册图像数: {sum(len(m.images) for m in maps.values()) if maps else 0}")
+        print(f"聚类数: {len(maps) if maps else 0}")
+        
+        # 检查是否需要重新建图
+        if first_time < time_threshold and attempt < max_attempts and images_num < 60:
+            print(f"建图时间 {first_time:.2f}秒 小于阈值 {time_threshold}秒，进行第二次建图...")
+            
+            attempt += 1
+            print(f"开始第 {attempt} 次建图...")
+            
+            # 修改建图参数以获得不同结果
+            modified_options = deepcopy(mapper_options)
+            
+            # 调整参数策略
+            if hasattr(modified_options.mapper, 'init_min_tri_angle'):
+                modified_options.mapper.init_min_tri_angle *= 0.8
+            if hasattr(modified_options.mapper, 'abs_pose_min_inliers_ratio'):
+                modified_options.mapper.abs_pose_min_inliers_ratio *= 0.9
+            if hasattr(modified_options.mapper, 'filter_max_reproj_error'):
+                modified_options.mapper.filter_max_reproj_error *= 1.1
+            
+            # 第二次建图
+            t_start2 = time()
+            os.makedirs(f"{output_path}_attempt_{attempt}", exist_ok=True)
+            
+            try:
+                maps2 = pycolmap.incremental_mapping(
+                    database_path=database_path,
+                    image_path=images_dir,
+                    output_path=f"{output_path}_attempt_{attempt}",
+                    options=modified_options
+                )
+                second_time = time() - t_start2
+                total_time += second_time
+                
+                print(f"第 {attempt} 次建图完成，耗时: {second_time:.2f}秒")
+                print(f"注册图像数: {sum(len(m.images) for m in maps2.values()) if maps2 else 0}")
+                print(f"聚类数: {len(maps2) if maps2 else 0}")
+                
+                # 比较两次建图结果
+                print("比较两次建图结果...")
+                best_maps = compare_reconstruction_models(maps, maps2, None)
+                
+                # 确定最优结果对应的attempt
+                if best_maps == maps:
+                    print("第一次建图结果更优")
+                    final_output = f"{output_path}_attempt_1"
+                else:
+                    print("第二次建图结果更优")
+                    final_output = f"{output_path}_attempt_2"
+                
+                # 复制最优结果到最终输出目录
+                if os.path.exists(output_path):
+                    shutil.rmtree(output_path)
+                shutil.copytree(final_output, output_path)
+                
+            except Exception as e:
+                print(f"第二次建图失败: {e}")
+                print("使用第一次建图结果")
+        else:
+            if first_time >= time_threshold:
+                print(f"建图时间 {first_time:.2f}秒 >= 阈值 {time_threshold}秒，不进行重新建图")
+            else:
+                print(f"已达到最大尝试次数 {max_attempts}，停止重新建图")
+    
+    except Exception as e:
+        print(f"第一次建图失败: {e}")
+        best_maps = {}
+        
+    return best_maps, total_time, attempt
 
 # @dataclasses.dataclass
 # class Prediction:
@@ -5616,7 +5802,7 @@ if is_OneTest:
 else:
     dataset_train_test_lst = [
         'ETs',
-        # 'stairs'
+        'stairs'
         # 'imc2023_heritage'
     ]
     
@@ -5641,7 +5827,7 @@ for dataset, predictions in samples.items():
     feature_dir = os.path.join(workdir, 'featureout', dataset)
     os.makedirs(feature_dir, exist_ok=True)
 
-    if 1:
+    if 0:
         # try:
         t = time()
         # index_pairs = get_image_pairs_shortlist(images, sim_th=0.3, min_pairs=20, 
@@ -5698,20 +5884,20 @@ for dataset, predictions in samples.items():
         # timings['feature_matching'].append(time() - t)
         # print(f'Features matched in {time() - t:.4f} sec')
 
-        # 3. 微调LightGlue
-        t = time()
-        finetuned_model = fine_tune_lightglue(
-            lightglue_matcher,
-            images, 
-            feature_dir, 
-            device,
-            batch_size=4,
-            epochs=1,
-            up_limits=15
-        )
-        lightglue_matcher.update_model(finetuned_model)
-        lightglue_matcher.model = finetuned_model
-        print(f'模型微调完成，耗时 {time() - t:.4f} sec')
+        # # 3. 微调LightGlue
+        # t = time()
+        # finetuned_model = fine_tune_lightglue(
+        #     lightglue_matcher,
+        #     images, 
+        #     feature_dir, 
+        #     device,
+        #     batch_size=4,
+        #     epochs=1,
+        #     up_limits=15
+        # )
+        # lightglue_matcher.update_model(finetuned_model)
+        # lightglue_matcher.model = finetuned_model
+        # print(f'模型微调完成，耗时 {time() - t:.4f} sec')
         
 
         # from safe_match import match_with_gimlightglue_ensemble_withfine_safe
@@ -5758,7 +5944,7 @@ for dataset, predictions in samples.items():
         # lr_out_csv_path = os.path.join(feature_dir, 'lr_pred.csv')
         # filtered_matches_dict = filter_match_with_lr(matches_dict, features_data, model_dir=lr_model_path,threshold=0.3785,output_csv=lr_out_csv_path)
         cnn_model_path = './models/0528_best_model.pth'
-        filtered_matches_dict = filter_matches_with_cnn(cnn_model_path, matches_dict, images, threshold=0.001, max_filter_ratio=0.25)
+        filtered_matches_dict = filter_matches_with_cnn(cnn_model_path, matches_dict, images, threshold=0.01, max_filter_ratio=0.3)
         filtered_matches_dict, cycle_error_data = filter_matches_graph(images, filtered_matches_dict, features_data, output_csv=cycle_csv_path, verbose=False)
         
         # # 示例调用
@@ -5835,10 +6021,26 @@ for dataset, predictions in samples.items():
 
     os.makedirs(output_path, exist_ok=True)
     t = time()
-    maps = pycolmap.incremental_mapping(database_path=database_path, 
-                                        image_path=images_dir,
-                                        output_path=output_path,
-                                        options=mapper_options)
+    # maps = pycolmap.incremental_mapping(database_path=database_path, 
+    #                                     image_path=images_dir,
+    #                                     output_path=output_path,
+    #                                     options=mapper_options)
+    
+    maps, mapping_time, num_attempts = incremental_mapping_with_monitoring(
+        database_path=database_path,
+        image_path=images_dir,
+        output_path=output_path,
+        mapper_options=mapper_options,
+        images_num=len(images),
+        time_threshold=300.0,  # 30秒阈值，可根据需要调整
+        max_attempts=2
+    )
+    if mapping_time == 0:
+        maps = pycolmap.incremental_mapping(database_path=database_path, 
+                                    image_path=images_dir,
+                                    output_path=output_path,
+                                    options=mapper_options)
+    
 
     sleep(1)
     timings['Reconstruction'].append(time() - t)
