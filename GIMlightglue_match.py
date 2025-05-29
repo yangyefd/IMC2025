@@ -286,54 +286,50 @@ def preprocess(image: np.ndarray, grayscale: bool = False, resize_max: int = Non
     scale = np.array(size) / np.array(size_new)[::-1]
     return image, scale
 
-def preprocess_mr(image: np.ndarray, mr_lst=[1024, 1280, 840], grayscale: bool = False, resize_max: int = None,
+def preprocess_mr(image: np.ndarray, grayscale: bool = False, resize_max: int = None,
                dfactor: int = 8):
     image = image.astype(np.float32, copy=False)
     size = image.shape[:2][::-1]
     scale = np.array([1.0, 1.0])
 
-    # resize_max = 4096
-    # if resize_max:
-    #     scale = resize_max / max(size)
-    #     if scale < 1.0:
-    #         size_new = tuple(int(round(x*scale)) for x in size)
-    #         image = resize_image(image, size_new, 'cv2_area')
-    #         scale = np.array(size) / np.array(size_new)
-    image_t = copy.deepcopy(image)
-    scale_lst = []
-    image_lst = []
-    for size_mr_one in mr_lst:
-        scale = size_mr_one / max(size)
-        size_new = tuple(int(round(x*scale)) for x in size)
-        image = resize_image(image_t, size_new, 'cv2_area')
-        scale = np.array(size) / np.array(size_new)
+    resize_max = 4096
+    if resize_max:
+        scale = resize_max / max(size)
+        if scale < 1.0:
+            size_new = tuple(int(round(x*scale)) for x in size)
+            image = resize_image(image, size_new, 'cv2_area')
+            scale = np.array(size) / np.array(size_new)
 
 
-        # resize_min = 1024
-        # if resize_min:
-        #     scale = resize_min / max(size)
-        #     scale = min(scale, 1.25)
-        #     if scale > 1.0:
-        #         size_new = tuple(int(round(x*scale)) for x in size)
-        #         image = resize_image(image, size_new, 'cv2_area')
-        #         scale = np.array(size) / np.array(size_new)
-                
-        if grayscale:
-            assert image.ndim == 2, image.shape
-            image = image[None]
-        else:
-            image = image.transpose((2, 0, 1))  # HxWxC to CxHxW
-        image = torch.from_numpy(image / 255.0).float()
+    scale_mr = 1024 / max(size)
+    size_new_mr = tuple(int(round(x*scale_mr)) for x in size)
+    image_mr = resize_image(image, size_new_mr, 'cv2_area')
+    scale_mr = np.array(size) / np.array(size_new_mr)
 
-        # assure that the size is divisible by dfactor
-        size_new = tuple(map(
-                lambda x: int(x // dfactor * dfactor),
-                image.shape[-2:]))
-        image = F.resize(image, size=size_new)
-        scale = np.array(size) / np.array(size_new)[::-1]
-        scale_lst.append(scale)
-        image_lst.append(image)
-    return image_lst, scale_lst
+
+    if grayscale:
+        assert image.ndim == 2, image.shape
+        image = image[None]
+        image_mr = image_mr[None]
+    else:
+        image = image.transpose((2, 0, 1))  # HxWxC to CxHxW
+        image_mr = image_mr.transpose((2, 0, 1))  # HxWxC to CxHxW
+    image = torch.from_numpy(image / 255.0).float()
+    image_mr = torch.from_numpy(image_mr / 255.0).float()
+
+    # assure that the size is divisible by dfactor
+    size_new = tuple(map(
+            lambda x: int(x // dfactor * dfactor),
+            image.shape[-2:]))
+    image = F.resize(image, size=size_new)
+    scale = np.array(size) / np.array(size_new)[::-1]
+
+    size_new_mr = tuple(map(
+            lambda x: int(x // dfactor * dfactor),
+            image_mr.shape[-2:]))
+    image_mr = F.resize(image_mr, size=size_new_mr)
+    scale_mr = np.array(size) / np.array(size_new_mr)[::-1]
+    return [image,image_mr], [scale, scale_mr]
 
 def preprocess_rot(image: np.ndarray, grayscale: bool = False, resize_max: int = None,
                dfactor: int = 8):
@@ -960,15 +956,14 @@ class Lightglue_Matcher():
             data_rot.append(data)
         return pred_rot, data_rot
 
-    def extract_mr(self, img_path0, nms_radius=3, mr_lst=[1024, 1280, 840]):
+    def extract_mr(self, img_path0, nms_radius=3, force=False):
         device = self.device
         gray0 = read_image(img_path0, grayscale=True)
         gray0_lst, scale0_lst = preprocess_mr(gray0, grayscale=True)
-        
 
         pred_lst = []
         data_lst = []
-        for gray0, scale0 in zip(gray0_lst, scale0_lst):
+        for i, (gray0, scale0) in enumerate(zip(gray0_lst, scale0_lst)):
             gray0 = gray0.to(device)[None]
             scale0 = torch.tensor(scale0).to(device)[None]
 
@@ -982,9 +977,14 @@ class Lightglue_Matcher():
 
             pred = {}
             with torch.no_grad():
-                pred.update({k + '0': v for k, v in self.detector({
-                    "image": data["gray0"],
-                }).items()})
+                if force:
+                    pred.update({k + '0': v for k, v in self.detector_fine({
+                        "image": data["gray0"],
+                    }).items()})
+                else:
+                    pred.update({k + '0': v for k, v in self.detector({
+                        "image": data["gray0"],
+                    }).items()})
 
             # 获取特征点和分数
             keypoints = pred['keypoints0']
@@ -1051,7 +1051,6 @@ class Lightglue_Matcher():
             pred['scores0'] = scores
 
             pred['keypoints0'] = torch.cat([kp * s for kp, s in zip(pred['keypoints0'], data['scale0'][:, None])])
-            
             pred_lst.append(pred)
             data_lst.append(data)
         return pred_lst, data_lst
