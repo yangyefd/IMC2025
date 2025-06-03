@@ -1,6 +1,6 @@
 # IMC2025 Image Matching Challenge Solution
 
-[中文 README](README.zh.md) | [English README](README.md)
+[中文 README](readme.zh.md) | [English README](readme.md)
 ## Overview
 
 This is a complete solution for IMC2025 (Image Matching Challenge 2025), implementing a deep learning-based image matching and 3D reconstruction pipeline. The solution combines multiple state-of-the-art feature detection and matching algorithms, achieving 8th place in the competition.
