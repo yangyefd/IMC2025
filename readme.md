@@ -111,33 +111,12 @@ tok_limit = 1200        # Maximum token limit
 ### 4. Match Filtering
 - Graph consistency checks
 - Cycle consistency verification
-- Geometry constraint-based filtering
 
 ### 5. 3D Reconstruction
 - COLMAP database construction
 - Incremental reconstruction
 - Multiple reconstruction comparison
 - Optimal result selection
-
-## Performance Optimization
-
-### GPU Acceleration
-- Full GPU acceleration for feature detection and matching
-- Batch processing to reduce GPU-CPU data transfer
-- Memory management and garbage collection
-
-### Algorithm Optimization
-- Adaptive parameter adjustment
-- Intelligent image pair selection
-- Multi-stage matching strategy
-- Parallel processing support
-
-## Evaluation Metrics
-
-- **Registered Image Ratio**: Proportion of successfully reconstructed images
-- **Track Length**: Average observation count of 3D points
-- **Reprojection Error**: Reconstruction accuracy metric
-- **Cluster Count**: Connectivity of reconstructed scenes
 
 ## Links
 
